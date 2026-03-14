@@ -147,26 +147,46 @@ impl CompanionManager {
             ),
         );
 
-        cx.spawn(async move |this, cx| {
-            let CompanionServerStart { handle, command_rx } = startup.await?;
-            let access_info = handle.access_info().clone();
+        cx.spawn(async move |this, cx| match startup.await {
+            Ok(CompanionServerStart { handle, command_rx }) => {
+                let access_info = handle.access_info().clone();
 
-            this.update(cx, |this, cx| {
-                let command_task = cx.spawn(async move |this, cx| {
-                    let mut command_rx = command_rx;
-                    while let Some(command) = command_rx.next().await {
-                        this.update(cx, |this, cx| this.handle_command(command, cx))??;
-                    }
-                    Ok(())
-                });
+                this.update(cx, |this, cx| {
+                    let command_task = cx.spawn(async move |this, cx| {
+                        let mut command_rx = command_rx;
+                        while let Some(command) = command_rx.next().await {
+                            this.update(cx, |this, cx| this.handle_command(command, cx))??;
+                        }
+                        Ok(())
+                    });
 
-                this._command_task = Some(command_task);
-                this.server = Some(handle);
-                this.status.state = CompanionServiceState::Running;
-                this.status.access_info = Some(access_info.clone());
-                this.emit_status(cx);
-                Ok(access_info)
-            })?
+                    this._command_task = Some(command_task);
+                    this.server = Some(handle);
+                    this.status.state = CompanionServiceState::Running;
+                    this.status.access_info = Some(access_info.clone());
+                    this.emit_status(cx);
+                    Ok(access_info)
+                })?
+            }
+            Err(error) => {
+                let message = error.to_string();
+                this.update(cx, |this, cx| {
+                    this.status.state = CompanionServiceState::Failed { message };
+                    this.status.access_info = None;
+                    this.mirror.update(cx, |mirror, cx| {
+                        mirror.set_connection(
+                            CompanionConnectionMetadata {
+                                token_id: String::new(),
+                                issued_at_unix_ms: None,
+                                expires_at_unix_ms: None,
+                            },
+                            cx,
+                        );
+                    });
+                    this.emit_status(cx);
+                })?;
+                Err(error)
+            }
         })
     }
 

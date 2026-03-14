@@ -354,6 +354,7 @@ dependencies = [
  "action_log",
  "agent",
  "agent-client-protocol",
+ "agent_companion",
  "agent_servers",
  "agent_settings",
  "ai_onboarding",

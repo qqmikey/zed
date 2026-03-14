@@ -12,6 +12,9 @@ use std::{
 use acp_thread::{AcpThread, MentionUri, ThreadStatus};
 use agent::{ContextServerRegistry, SharedThread, ThreadStore};
 use agent_client_protocol as acp;
+use agent_companion::{
+    CompanionManager, CompanionManagerEvent, CompanionServiceState, CompanionSessionSource,
+};
 use agent_servers::AgentServer;
 use collections::HashSet;
 use db::kvp::{Dismissable, KEY_VALUE_STORE};
@@ -34,7 +37,8 @@ use crate::{
     AddContextServer, AgentDiffPane, ConnectionView, CopyThreadToClipboard, CycleStartThreadIn,
     Follow, InlineAssistant, LoadThreadFromClipboard, NewTextThread, NewThread,
     OpenActiveThreadAsMarkdown, OpenAgentDiff, OpenHistory, ResetTrialEndUpsell, ResetTrialUpsell,
-    StartThreadIn, ToggleNavigationMenu, ToggleNewThreadMenu, ToggleOptionsMenu,
+    ShareMobileCompanion, StartThreadIn, StopMobileCompanion, ToggleNavigationMenu,
+    ToggleNewThreadMenu, ToggleOptionsMenu,
     agent_configuration::{AgentConfiguration, AssistantConfigurationEvent},
     connection_view::{AcpThreadViewEvent, ThreadView},
     slash_command::SlashCommandCompletionProvider,
@@ -355,6 +359,21 @@ pub fn init(cx: &mut App) {
                         workspace.focus_panel::<AgentPanel>(window, cx);
                         panel.update(cx, |panel, cx| {
                             panel.load_thread_from_clipboard(window, cx);
+                        });
+                    }
+                })
+                .register_action(|workspace, _: &ShareMobileCompanion, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                        panel.update(cx, |panel, cx| {
+                            panel.share_mobile_companion(window, cx);
+                        });
+                    }
+                })
+                .register_action(|workspace, _: &StopMobileCompanion, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.stop_mobile_companion(window, cx);
                         });
                     }
                 })
@@ -893,6 +912,7 @@ pub struct AgentPanel {
     _thread_view_subscription: Option<Subscription>,
     _active_thread_focus_subscription: Option<Subscription>,
     _worktree_creation_task: Option<Task<()>>,
+    _companion_manager_subscription: Subscription,
     show_trust_workspace_message: bool,
     last_configuration_error_telemetry: Option<String>,
     on_boarding_upsell_dismissed: AtomicBool,
@@ -1193,6 +1213,11 @@ impl AgentPanel {
             );
             store
         });
+        let companion_manager = CompanionManager::global(cx);
+        let companion_manager_subscription =
+            cx.subscribe(&companion_manager, |_, _, _: &CompanionManagerEvent, cx| {
+                cx.notify();
+            });
         let mut panel = Self {
             workspace_id,
             active_view,
@@ -1229,6 +1254,7 @@ impl AgentPanel {
             _thread_view_subscription: None,
             _active_thread_focus_subscription: None,
             _worktree_creation_task: None,
+            _companion_manager_subscription: companion_manager_subscription,
             show_trust_workspace_message: false,
             last_configuration_error_telemetry: None,
             on_boarding_upsell_dismissed: AtomicBool::new(OnboardingUpsell::dismissed()),
@@ -1930,27 +1956,131 @@ impl AgentPanel {
         .detach_and_log_err(cx);
     }
 
+    fn share_mobile_companion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let companion_manager = CompanionManager::global(cx);
+
+        if let Some(access_info) = companion_manager.read(cx).status().access_info.clone() {
+            if let Some(source) = self.companion_session_source(cx) {
+                companion_manager.update(cx, |manager, cx| {
+                    manager.set_source(Some(source), cx);
+                });
+            }
+
+            Self::copy_to_clipboard_and_show_toast(
+                &self.workspace,
+                access_info.url,
+                "Mobile companion link copied to clipboard",
+                cx,
+            );
+            return;
+        }
+
+        let Some(source) = self.companion_session_source(cx) else {
+            Self::show_deferred_toast(
+                &self.workspace,
+                "Open a thread before starting Mobile Companion",
+                cx,
+            );
+            return;
+        };
+
+        let workspace = self.workspace.clone();
+        cx.spawn_in(window, async move |_this, cx| {
+            let result = companion_manager
+                .update(cx, |manager, cx| manager.start(source, cx))
+                .await;
+
+            cx.update(|_window, cx| match &result {
+                Ok(access_info) => Self::copy_to_clipboard_and_show_toast(
+                    &workspace,
+                    access_info.url.clone(),
+                    "Mobile companion started and link copied to clipboard",
+                    cx,
+                ),
+                Err(error) => Self::show_toast(
+                    &workspace,
+                    format!("Failed to start mobile companion: {error}"),
+                    cx,
+                ),
+            })?;
+
+            result.map(|_| ())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn show_toast(
+        workspace: &WeakEntity<workspace::Workspace>,
+        message: impl Into<SharedString>,
+        cx: &mut App,
+    ) {
+        let Some(workspace) = workspace.upgrade() else {
+            return;
+        };
+
+        let message = message.into();
+        workspace.update(cx, |workspace, cx| {
+            struct ClipboardToast;
+            workspace.show_toast(
+                workspace::Toast::new(
+                    workspace::notifications::NotificationId::unique::<ClipboardToast>(),
+                    message.to_string(),
+                )
+                .autohide(),
+                cx,
+            );
+        });
+    }
+
+    fn copy_to_clipboard_and_show_toast(
+        workspace: &WeakEntity<workspace::Workspace>,
+        content: String,
+        message: impl Into<SharedString>,
+        cx: &mut App,
+    ) {
+        cx.write_to_clipboard(ClipboardItem::new_string(content));
+        Self::show_toast(workspace, message, cx);
+    }
+
     fn show_deferred_toast(
         workspace: &WeakEntity<workspace::Workspace>,
-        message: &'static str,
+        message: impl Into<SharedString>,
         cx: &mut App,
     ) {
         let workspace = workspace.clone();
+        let message = message.into();
         cx.defer(move |cx| {
-            if let Some(workspace) = workspace.upgrade() {
-                workspace.update(cx, |workspace, cx| {
-                    struct ClipboardToast;
-                    workspace.show_toast(
-                        workspace::Toast::new(
-                            workspace::notifications::NotificationId::unique::<ClipboardToast>(),
-                            message,
-                        )
-                        .autohide(),
-                        cx,
-                    );
-                });
-            }
+            Self::show_toast(&workspace, message.clone(), cx);
         });
+    }
+
+    fn stop_mobile_companion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let companion_manager = CompanionManager::global(cx);
+        if matches!(
+            companion_manager.read(cx).status().state,
+            CompanionServiceState::Stopped | CompanionServiceState::Starting
+        ) {
+            return;
+        }
+
+        let workspace = self.workspace.clone();
+        cx.spawn_in(window, async move |_this, cx| {
+            let result = companion_manager
+                .update(cx, |manager, cx| manager.stop(cx))
+                .await;
+
+            cx.update(|_window, cx| match &result {
+                Ok(()) => Self::show_toast(&workspace, "Mobile companion stopped", cx),
+                Err(error) => Self::show_toast(
+                    &workspace,
+                    format!("Failed to stop mobile companion: {error}"),
+                    cx,
+                ),
+            })?;
+
+            result
+        })
+        .detach_and_log_err(cx);
     }
 
     fn load_thread_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2095,6 +2225,35 @@ impl AgentPanel {
         }
     }
 
+    fn companion_session_source(&self, cx: &App) -> Option<CompanionSessionSource> {
+        if let Some(thread) = self.active_agent_thread(cx) {
+            return Some(CompanionSessionSource::AcpThread(thread));
+        }
+
+        let text_thread_editor = self.active_text_thread_editor()?;
+        Some(CompanionSessionSource::TextThread(
+            text_thread_editor.read(cx).text_thread().clone(),
+        ))
+    }
+
+    fn sync_companion_source(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.companion_session_source(cx) else {
+            return;
+        };
+
+        let companion_manager = CompanionManager::global(cx);
+        let should_sync = matches!(
+            companion_manager.read(cx).status().state,
+            CompanionServiceState::Starting | CompanionServiceState::Running
+        );
+
+        if should_sync {
+            companion_manager.update(cx, |manager, cx| {
+                manager.set_source(Some(source), cx);
+            });
+        }
+    }
+
     /// Returns the primary thread views for all retained connections: the
     pub fn is_background_thread(&self, session_id: &acp::SessionId) -> bool {
         self.background_threads.contains_key(session_id)
@@ -2215,6 +2374,7 @@ impl AgentPanel {
                     cx.observe_in(server_view, window, |this, server_view, window, cx| {
                         this._thread_view_subscription =
                             Self::subscribe_to_active_thread_view(&server_view, window, cx);
+                        this.sync_companion_source(cx);
                         cx.emit(AgentPanelEvent::ActiveViewChanged);
                         this.serialize(cx);
                         cx.notify();
@@ -2236,6 +2396,8 @@ impl AgentPanel {
                 });
             }
         }
+
+        self.sync_companion_source(cx);
 
         if focus {
             self.focus_handle(cx).focus(window, cx);
@@ -3459,6 +3621,8 @@ impl AgentPanel {
             ActiveView::AgentThread { server_view } => server_view.read(cx).has_auth_methods(),
             _ => false,
         };
+        let companion_status = CompanionManager::global(cx).read(cx).status().clone();
+        let can_start_mobile_companion = self.companion_session_source(cx).is_some();
 
         PopoverMenu::new("agent-options-menu")
             .trigger_with_tooltip(
@@ -3533,6 +3697,35 @@ impl AgentPanel {
                             .action("Settings", Box::new(OpenSettings))
                             .separator()
                             .action(full_screen_label, Box::new(ToggleZoom));
+
+                        menu = menu.separator().header("Mobile Companion");
+
+                        menu = match &companion_status.state {
+                            CompanionServiceState::Stopped => menu.action_disabled_when(
+                                !can_start_mobile_companion,
+                                "Share Mobile Companion",
+                                Box::new(ShareMobileCompanion),
+                            ),
+                            CompanionServiceState::Starting => {
+                                menu.label("Starting Mobile Companion…")
+                            }
+                            CompanionServiceState::Running => menu
+                                .action(
+                                    "Copy Mobile Companion Link",
+                                    Box::new(ShareMobileCompanion),
+                                )
+                                .action("Stop Mobile Companion", Box::new(StopMobileCompanion)),
+                            CompanionServiceState::Stopping => {
+                                menu.label("Stopping Mobile Companion…")
+                            }
+                            CompanionServiceState::Failed { .. } => menu
+                                .label("Mobile Companion failed to start")
+                                .action_disabled_when(
+                                    !can_start_mobile_companion,
+                                    "Retry Mobile Companion",
+                                    Box::new(ShareMobileCompanion),
+                                ),
+                        };
 
                         if has_auth_methods {
                             menu = menu.action("Reauthenticate", Box::new(ReauthenticateAgent))
