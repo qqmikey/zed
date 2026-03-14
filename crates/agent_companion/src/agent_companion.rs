@@ -1,6 +1,7 @@
 mod protocol;
 mod server;
 mod session_mirror;
+mod static_client;
 
 use anyhow::Result;
 use futures::StreamExt as _;

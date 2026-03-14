@@ -20,6 +20,7 @@ use tokio::{
     task::JoinHandle,
 };
 
+use crate::static_client;
 use crate::{CompanionCommand, CompanionEvent, CompanionSnapshot};
 
 #[derive(Clone)]
@@ -136,7 +137,7 @@ pub async fn start_server(
 }
 
 pub fn default_client_html() -> &'static str {
-    "<!doctype html><html><body><p>Agent Companion server is running.</p></body></html>"
+    static_client::default_client_html()
 }
 
 fn router(state: CompanionServerState) -> Router {
@@ -299,6 +300,27 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn client_route_returns_embedded_ui() {
+        let (state, _) = test_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/companion?token=test-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body()).await.expect("body");
+        let html = String::from_utf8(body.to_vec()).expect("utf8");
+        assert!(html.contains("Agent Companion"));
+        assert!(html.contains("Tool Timeline"));
     }
 
     #[tokio::test]
