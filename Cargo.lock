@@ -257,6 +257,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent_companion"
+version = "0.1.0"
+dependencies = [
+ "acp_thread",
+ "agent-client-protocol",
+ "anyhow",
+ "assistant_slash_command",
+ "assistant_text_thread",
+ "gpui",
+ "language",
+ "language_model",
+ "prompt_store",
+ "serde",
+ "serde_json",
+ "settings",
+]
+
+[[package]]
 name = "agent_servers"
 version = "0.1.0"
 dependencies = [
