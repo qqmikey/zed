@@ -265,13 +265,20 @@ dependencies = [
  "anyhow",
  "assistant_slash_command",
  "assistant_text_thread",
+ "axum",
+ "futures 0.3.31",
  "gpui",
+ "gpui_tokio",
+ "hyper 0.14.32",
  "language",
  "language_model",
  "prompt_store",
  "serde",
  "serde_json",
  "settings",
+ "tokio",
+ "tower 0.4.13",
+ "uuid",
 ]
 
 [[package]]
@@ -21820,6 +21827,7 @@ dependencies = [
  "activity_indicator",
  "agent",
  "agent-client-protocol",
+ "agent_companion",
  "agent_servers",
  "agent_settings",
  "agent_ui",

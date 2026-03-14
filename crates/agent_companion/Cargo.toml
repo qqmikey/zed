@@ -16,16 +16,24 @@ acp_thread.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
 assistant_text_thread.workspace = true
+axum = { version = "0.6", features = ["json", "ws"] }
+futures.workspace = true
 gpui.workspace = true
+gpui_tokio.workspace = true
 language_model.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net", "sync"] }
+uuid.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
 assistant_slash_command.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
+hyper = "0.14"
 language.workspace = true
 language_model = { workspace = true, features = ["test-support"] }
 prompt_store.workspace = true
 settings = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
+tower = "0.4"
