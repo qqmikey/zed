@@ -51,6 +51,8 @@ pub struct CompanionMessage {
     pub role: CompanionMessageRole,
     pub status: CompanionMessageStatus,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_html: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<CompanionAttachment>,
 }
@@ -247,6 +249,7 @@ mod tests {
                     role: CompanionMessageRole::User,
                     status: CompanionMessageStatus::Done,
                     text: "Run the test suite".into(),
+                    rendered_html: Some("<p>Run the test suite</p>\n".into()),
                     attachments: vec![CompanionAttachment::File {
                         id: "attachment-1".into(),
                         name: "test-output.txt".into(),
@@ -259,6 +262,7 @@ mod tests {
                     role: CompanionMessageRole::Assistant,
                     status: CompanionMessageStatus::Pending,
                     text: "Running tests now".into(),
+                    rendered_html: Some("<p>Running tests now</p>\n".into()),
                     attachments: vec![CompanionAttachment::Image {
                         id: "attachment-2".into(),
                         name: "progress.png".into(),
@@ -318,6 +322,10 @@ mod tests {
         assert_eq!(json["session"]["id"], "thread-1");
         assert_eq!(json["connection"]["access_mode"], "control");
         assert_eq!(json["messages"][1]["role"], "assistant");
+        assert_eq!(
+            json["messages"][0]["rendered_html"],
+            "<p>Run the test suite</p>\n"
+        );
         assert_eq!(json["messages"][1]["attachments"][0]["type"], "image");
         assert_eq!(json["has_more_messages_before"], true);
         assert_eq!(json["tool_calls"][0]["status"], "waiting_for_confirmation");
@@ -376,6 +384,7 @@ mod tests {
                 role: CompanionMessageRole::Assistant,
                 status: CompanionMessageStatus::Pending,
                 text: "Searching codebase".into(),
+                rendered_html: None,
                 attachments: Vec::new(),
             }],
             has_more_before: true,

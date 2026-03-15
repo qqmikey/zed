@@ -8,10 +8,9 @@ use assistant_text_thread::{
 };
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use language_model::Role;
-use regex::Regex;
+use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
-use url::Url;
+use url::{Url, form_urlencoded};
 use uuid::Uuid;
 
 use crate::{
@@ -356,6 +355,7 @@ fn state_for_acp_thread(
                     &message.chunks,
                     message_id.as_str(),
                     ResourceBlockFallback::Uri,
+                    connection.token_id.as_str(),
                 );
                 assets.extend(extracted.assets);
                 messages.push(CompanionMessage {
@@ -363,13 +363,18 @@ fn state_for_acp_thread(
                     role: CompanionMessageRole::User,
                     status: CompanionMessageStatus::Done,
                     text: extracted.text,
+                    rendered_html: extracted.rendered_html,
                     attachments: extracted.attachments,
                 });
             }
             AgentThreadEntry::AssistantMessage(message) => {
                 let message_id = format!("assistant-{index}");
-                let extracted =
-                    companion_content_from_assistant_message(message, message_id.as_str(), cx);
+                let extracted = companion_content_from_assistant_message(
+                    message,
+                    message_id.as_str(),
+                    connection.token_id.as_str(),
+                    cx,
+                );
                 let status = if thread.status() == ThreadStatus::Generating
                     && index + 1 == thread.entries().len()
                 {
@@ -383,6 +388,7 @@ fn state_for_acp_thread(
                     role: CompanionMessageRole::Assistant,
                     status,
                     text: extracted.text,
+                    rendered_html: extracted.rendered_html,
                     attachments: extracted.attachments,
                 });
             }
@@ -444,19 +450,31 @@ fn state_for_text_thread(
     cx: &App,
 ) -> CompanionMirrorState {
     let buffer = thread.buffer().read(cx);
-    let messages = thread
-        .messages(cx)
-        .enumerate()
-        .map(|(index, message)| CompanionMessage {
-            id: format!("text-{index}"),
+    let mut messages = Vec::new();
+    let mut assets = Vec::new();
+
+    for (index, message) in thread.messages(cx).enumerate() {
+        let message_id = format!("text-{index}");
+        let text = buffer
+            .text_for_range(message.offset_range.clone())
+            .collect::<String>();
+        let mut attachment_index = 0;
+        let rendered_markdown = render_companion_markdown(
+            &text,
+            message_id.as_str(),
+            &mut attachment_index,
+            connection.token_id.as_str(),
+        );
+        assets.extend(rendered_markdown.assets);
+        messages.push(CompanionMessage {
+            id: message_id,
             role: map_role(message.role),
             status: map_text_message_status(&message.status),
-            text: buffer
-                .text_for_range(message.offset_range.clone())
-                .collect(),
+            text,
+            rendered_html: rendered_markdown.rendered_html,
             attachments: Vec::new(),
-        })
-        .collect::<Vec<_>>();
+        });
+    }
 
     let streaming_text = streaming_text_for_messages(&messages);
 
@@ -475,7 +493,7 @@ fn state_for_text_thread(
             run_status: map_text_run_status(thread, cx),
             available_commands: available_commands_for_text_thread(thread, cx),
         },
-        assets: Vec::new(),
+        assets,
     }
 }
 
@@ -709,14 +727,16 @@ impl CompanionExtractedContent {
         mut self,
         message_id: &str,
         attachment_index: &mut usize,
+        token_id: &str,
     ) -> CompanionFinishedContent {
-        let text = normalize_message_text(self.text_parts.join("\n\n"));
-        let fallback = extract_local_markdown_attachments(&text, message_id, attachment_index);
-        self.attachments.extend(fallback.attachments);
-        self.assets.extend(fallback.assets);
+        let text = self.text_parts.join("\n\n");
+        let rendered_markdown =
+            render_companion_markdown(&text, message_id, attachment_index, token_id);
+        self.assets.extend(rendered_markdown.assets);
 
         CompanionFinishedContent {
-            text: fallback.text,
+            text,
+            rendered_html: rendered_markdown.rendered_html,
             attachments: self.attachments,
             assets: self.assets,
         }
@@ -725,6 +745,7 @@ impl CompanionExtractedContent {
 
 struct CompanionFinishedContent {
     text: String,
+    rendered_html: Option<String>,
     attachments: Vec<CompanionAttachment>,
     assets: Vec<CompanionAsset>,
 }
@@ -733,6 +754,7 @@ fn companion_content_from_acp_blocks(
     blocks: &[acp::ContentBlock],
     message_id: &str,
     resource_fallback: ResourceBlockFallback,
+    token_id: &str,
 ) -> CompanionFinishedContent {
     let mut content = CompanionExtractedContent::default();
     let mut attachment_index = 0;
@@ -791,12 +813,13 @@ fn companion_content_from_acp_blocks(
         }
     }
 
-    content.finish(message_id, &mut attachment_index)
+    content.finish(message_id, &mut attachment_index, token_id)
 }
 
 fn companion_content_from_assistant_message(
     message: &acp_thread::AssistantMessage,
     message_id: &str,
+    token_id: &str,
     cx: &App,
 ) -> CompanionFinishedContent {
     let mut content = CompanionExtractedContent::default();
@@ -833,7 +856,7 @@ fn companion_content_from_assistant_message(
         }
     }
 
-    content.finish(message_id, &mut attachment_index)
+    content.finish(message_id, &mut attachment_index, token_id)
 }
 
 #[derive(Clone, Copy)]
@@ -1224,64 +1247,151 @@ fn is_inline_image_mime_type(mime_type: &str) -> bool {
     mime_type.starts_with("image/")
 }
 
-static LOCAL_MARKDOWN_ATTACHMENT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?P<image>!)?\[(?P<label>[^\]]*)\]\((?P<target>[^)\s]+)\)"#)
-        .expect("valid markdown attachment regex")
-});
+struct CompanionRenderedMarkdown {
+    rendered_html: Option<String>,
+    assets: Vec<CompanionAsset>,
+}
 
-fn extract_local_markdown_attachments(
+fn render_companion_markdown(
     text: &str,
     message_id: &str,
     attachment_index: &mut usize,
-) -> CompanionFinishedContent {
-    let mut cleaned_text = String::with_capacity(text.len());
-    let mut attachments = Vec::new();
-    let mut assets = Vec::new();
-    let mut last_match_end = 0;
-
-    for capture in LOCAL_MARKDOWN_ATTACHMENT_REGEX.captures_iter(text) {
-        let Some(matched) = capture.get(0) else {
-            continue;
+    token_id: &str,
+) -> CompanionRenderedMarkdown {
+    if text.is_empty() {
+        return CompanionRenderedMarkdown {
+            rendered_html: None,
+            assets: Vec::new(),
         };
-        cleaned_text.push_str(&text[last_match_end..matched.start()]);
-
-        let label = capture
-            .name("label")
-            .map(|value| value.as_str())
-            .unwrap_or_default();
-        let target = capture
-            .name("target")
-            .map(|value| value.as_str())
-            .unwrap_or_default();
-
-        if let Some(path) = local_file_path_from_link_target(target) {
-            let (attachment, asset) =
-                file_attachment_from_local_path(label, path, None, message_id, *attachment_index);
-            attachments.push(attachment);
-            assets.push(asset);
-            *attachment_index += 1;
-        } else {
-            cleaned_text.push_str(matched.as_str());
-        }
-
-        last_match_end = matched.end();
     }
 
-    cleaned_text.push_str(&text[last_match_end..]);
+    let mut events = Vec::new();
+    let mut assets = Vec::new();
+    for event in Parser::new_ext(text, companion_markdown_options()) {
+        events.push(rewrite_markdown_event(
+            event,
+            message_id,
+            attachment_index,
+            token_id,
+            &mut assets,
+        ));
+    }
 
-    CompanionFinishedContent {
-        text: normalize_message_text(cleaned_text),
-        attachments,
+    let mut rendered_html = String::new();
+    html::push_html(&mut rendered_html, events.into_iter());
+
+    CompanionRenderedMarkdown {
+        rendered_html: (!rendered_html.trim().is_empty()).then_some(rendered_html),
         assets,
     }
 }
 
-fn normalize_message_text(text: String) -> String {
-    let mut normalized = text.trim().to_string();
-    while normalized.contains("\n\n\n") {
-        normalized = normalized.replace("\n\n\n", "\n\n");
+fn companion_markdown_options() -> Options {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options
+}
+
+fn rewrite_markdown_event(
+    event: Event<'_>,
+    message_id: &str,
+    attachment_index: &mut usize,
+    token_id: &str,
+    assets: &mut Vec<CompanionAsset>,
+) -> Event<'static> {
+    match event {
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Event::Start(Tag::Link {
+            link_type,
+            dest_url: rewrite_markdown_destination(
+                dest_url.as_ref(),
+                message_id,
+                attachment_index,
+                token_id,
+                assets,
+            ),
+            title: title.into_static(),
+            id: id.into_static(),
+        }),
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Event::Start(Tag::Image {
+            link_type,
+            dest_url: rewrite_markdown_destination(
+                dest_url.as_ref(),
+                message_id,
+                attachment_index,
+                token_id,
+                assets,
+            ),
+            title: title.into_static(),
+            id: id.into_static(),
+        }),
+        Event::Html(raw_html) | Event::InlineHtml(raw_html) => Event::Text(raw_html.into_static()),
+        Event::SoftBreak => Event::HardBreak,
+        _ => event.into_static(),
     }
-    normalized
+}
+
+fn rewrite_markdown_destination(
+    target: &str,
+    message_id: &str,
+    attachment_index: &mut usize,
+    token_id: &str,
+    assets: &mut Vec<CompanionAsset>,
+) -> CowStr<'static> {
+    if let Some(path) = local_file_path_from_link_target(target).filter(|path| path.exists()) {
+        let (_, asset) =
+            file_attachment_from_local_path("", path, None, message_id, *attachment_index);
+        let asset_url = companion_asset_url(&asset.id, token_id);
+        assets.push(asset);
+        *attachment_index += 1;
+        return CowStr::from(asset_url);
+    }
+
+    CowStr::from(sanitize_markdown_destination(target).unwrap_or_default())
+}
+
+fn sanitize_markdown_destination(target: &str) -> Option<String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with('#') {
+        return Some(trimmed.to_string());
+    }
+
+    if let Ok(url) = Url::parse(trimmed) {
+        return matches!(url.scheme(), "http" | "https" | "mailto" | "tel")
+            .then_some(trimmed.to_string());
+    }
+
+    if !trimmed.contains(':')
+        || trimmed.starts_with('/')
+        || trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+    {
+        return Some(trimmed.to_string());
+    }
+
+    None
+}
+
+fn companion_asset_url(asset_id: &str, token_id: &str) -> String {
+    let query = form_urlencoded::Serializer::new(String::new())
+        .append_pair("token", token_id)
+        .finish();
+    format!("/companion/assets/{asset_id}?{query}")
 }
 
 fn tool_call_output_preview(tool_call: &acp_thread::ToolCall, cx: &App) -> Option<String> {
@@ -1305,7 +1415,7 @@ fn truncate_preview(text: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{path::PathBuf, sync::Arc};
 
     use assistant_slash_command::SlashCommandWorkingSet;
     use gpui::{AppContext as _, TestAppContext};
@@ -1313,19 +1423,30 @@ mod tests {
     use language_model::LanguageModelRegistry;
     use prompt_store::PromptBuilder;
     use settings::SettingsStore;
+    use uuid::Uuid;
 
     use assistant_text_thread::TextThread;
 
     use super::{
         CompanionSessionMirror, CompanionSessionSource, ResourceBlockFallback,
         companion_content_from_acp_blocks, companion_permission_request_for_options, empty_state,
-        extract_local_markdown_attachments, streaming_text_for_messages, truncate_preview,
+        render_companion_markdown, streaming_text_for_messages, truncate_preview,
     };
     use crate::{
         CompanionAccessMode, CompanionAttachment, CompanionConnectionMetadata, CompanionEvent,
         CompanionMessage, CompanionMessageRole, CompanionMessageStatus, CompanionPermissionRequest,
         CompanionRunStatus,
     };
+
+    fn write_test_file(extension: &str, bytes: &[u8]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "zed-companion-test-{}.{}",
+            Uuid::new_v4(),
+            extension
+        ));
+        std::fs::write(&path, bytes).expect("write test file");
+        path
+    }
 
     #[gpui::test]
     async fn text_thread_source_replacement_emits_snapshot(cx: &mut TestAppContext) {
@@ -1407,6 +1528,7 @@ mod tests {
                 role: CompanionMessageRole::Assistant,
                 status: CompanionMessageStatus::Done,
                 text: "previous reply".into(),
+                rendered_html: None,
                 attachments: Vec::new(),
             },
             CompanionMessage {
@@ -1414,6 +1536,7 @@ mod tests {
                 role: CompanionMessageRole::User,
                 status: CompanionMessageStatus::Done,
                 text: "new question".into(),
+                rendered_html: None,
                 attachments: Vec::new(),
             },
         ];
@@ -1428,6 +1551,7 @@ mod tests {
             role: CompanionMessageRole::Assistant,
             status: CompanionMessageStatus::Pending,
             text: "streaming reply".into(),
+            rendered_html: None,
             attachments: Vec::new(),
         }];
 
@@ -1445,6 +1569,7 @@ mod tests {
             )],
             "message-1",
             ResourceBlockFallback::Uri,
+            "token-1",
         );
 
         assert!(extracted.text.is_empty());
@@ -1463,6 +1588,7 @@ mod tests {
             )],
             "message-2",
             ResourceBlockFallback::Uri,
+            "token-1",
         );
 
         assert!(extracted.text.is_empty());
@@ -1474,39 +1600,63 @@ mod tests {
     }
 
     #[test]
-    fn markdown_image_paths_become_inline_attachments() {
+    fn markdown_image_paths_render_inline_without_removing_source_text() {
+        let path = write_test_file("png", b"png");
         let mut attachment_index = 0;
-        let extracted = extract_local_markdown_attachments(
-            "Preview:\n\n![calculator](/tmp/calculator-window.png)",
+        let rendered = render_companion_markdown(
+            &format!("Preview:\n\n![calculator]({})", path.display()),
             "message-3",
             &mut attachment_index,
+            "token-1",
         );
 
-        assert_eq!(extracted.text, "Preview:");
-        assert!(matches!(
-            extracted.attachments.first(),
-            Some(CompanionAttachment::Image { .. })
-        ));
-        assert_eq!(extracted.assets.len(), 1);
+        assert_eq!(rendered.assets.len(), 1);
         assert_eq!(attachment_index, 1);
+        assert_eq!(
+            rendered.rendered_html,
+            Some(
+                "<p>Preview:</p>\n<p><img src=\"/companion/assets/message-3-asset-0?token=token-1\" alt=\"calculator\" /></p>\n"
+                    .into()
+            )
+        );
     }
 
     #[test]
-    fn markdown_file_links_become_downloadable_attachments() {
+    fn markdown_file_links_stay_in_text_and_become_clickable() {
+        let path = write_test_file("txt", b"report");
         let mut attachment_index = 0;
-        let extracted = extract_local_markdown_attachments(
-            "Artifact: [report.txt](/tmp/report.txt)",
+        let rendered = render_companion_markdown(
+            &format!("Artifact: [report.txt]({})", path.display()),
             "message-4",
             &mut attachment_index,
+            "token-1",
         );
 
-        assert_eq!(extracted.text, "Artifact:");
-        assert!(matches!(
-            extracted.attachments.first(),
-            Some(CompanionAttachment::File { .. })
-        ));
-        assert_eq!(extracted.assets.len(), 1);
+        assert_eq!(rendered.assets.len(), 1);
         assert_eq!(attachment_index, 1);
+        assert_eq!(
+            rendered.rendered_html,
+            Some(
+                "<p>Artifact: <a href=\"/companion/assets/message-4-asset-0?token=token-1\">report.txt</a></p>\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn markdown_renderer_escapes_raw_html_and_supports_code() {
+        let mut attachment_index = 0;
+        let rendered = render_companion_markdown(
+            "Use `cargo test`\n\n```rs\nfn main() {}\n```\n\n<script>alert(1)</script>",
+            "message-5",
+            &mut attachment_index,
+            "token-1",
+        );
+
+        let html = rendered.rendered_html.expect("rendered html");
+        assert!(html.contains("<code>cargo test</code>"));
+        assert!(html.contains("<pre><code class=\"language-rs\">fn main() {}\n</code></pre>"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
     }
 
     #[test]

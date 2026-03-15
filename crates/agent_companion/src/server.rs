@@ -663,6 +663,7 @@ mod tests {
                 role: CompanionMessageRole::Assistant,
                 status: CompanionMessageStatus::Done,
                 text: format!("message {index}"),
+                rendered_html: None,
                 attachments: Vec::new(),
             })
             .collect::<Vec<_>>();

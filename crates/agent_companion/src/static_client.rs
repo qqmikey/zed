@@ -353,10 +353,85 @@ pub fn default_client_html() -> &'static str {
     }
 
     .message-body {
-      white-space: pre-wrap;
       word-break: break-word;
+      overflow-wrap: anywhere;
       line-height: 1.5;
       font-size: 14px;
+    }
+
+    .message-body.plain {
+      white-space: pre-wrap;
+    }
+
+    .message-body.markdown > :first-child {
+      margin-top: 0;
+    }
+
+    .message-body.markdown > :last-child {
+      margin-bottom: 0;
+    }
+
+    .message-body.markdown p,
+    .message-body.markdown ul,
+    .message-body.markdown ol,
+    .message-body.markdown pre,
+    .message-body.markdown blockquote {
+      margin: 0.75em 0;
+    }
+
+    .message-body.markdown ul,
+    .message-body.markdown ol {
+      padding-left: 1.4em;
+    }
+
+    .message-body.markdown a {
+      color: rgba(123, 171, 255, 0.96);
+      text-decoration: underline;
+      text-underline-offset: 0.16em;
+    }
+
+    .message-body.markdown code {
+      padding: 0.12em 0.36em;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 0.92em;
+      font-family: "SFMono-Regular", "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+    }
+
+    .message-body.markdown pre {
+      overflow-x: auto;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(0, 0, 0, 0.28);
+    }
+
+    .message-body.markdown pre code {
+      display: block;
+      padding: 0;
+      background: transparent;
+      border-radius: 0;
+      white-space: pre;
+      overflow-wrap: normal;
+    }
+
+    .message-body.markdown img {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      height: auto;
+      max-height: 420px;
+      margin-top: 10px;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.03);
+      object-fit: contain;
+    }
+
+    .message-body.markdown blockquote {
+      padding-left: 12px;
+      border-left: 3px solid rgba(255, 255, 255, 0.12);
+      color: var(--text-soft);
     }
 
     .message-attachments {
@@ -1139,6 +1214,22 @@ pub fn default_client_html() -> &'static str {
         `;
       }
 
+      function renderMessageBody(message) {
+        if (message.placeholder) {
+          return '<div class="message-body plain"><span class="streaming-indicator">Thinking</span></div>';
+        }
+
+        if (message.rendered_html) {
+          return `<div class="message-body markdown">${message.rendered_html}</div>`;
+        }
+
+        if (message.text) {
+          return `<div class="message-body plain">${escapeHtml(message.text)}</div>`;
+        }
+
+        return "";
+      }
+
       function renderMessages() {
         const shouldStick = shouldAutoScroll();
         const entries = state.snapshot.messages.slice();
@@ -1151,6 +1242,7 @@ pub fn default_client_html() -> &'static str {
             entries[pendingAssistantIndex] = {
               ...entries[pendingAssistantIndex],
               text: state.snapshot.streaming_text,
+              rendered_html: null,
               streaming: true,
               placeholder: false
             };
@@ -1160,6 +1252,7 @@ pub fn default_client_html() -> &'static str {
               role: "assistant",
               status: "pending",
               text: state.snapshot.streaming_text,
+              rendered_html: null,
               attachments: [],
               streaming: true
             });
@@ -1171,6 +1264,7 @@ pub fn default_client_html() -> &'static str {
             entries[pendingAssistantIndex] = {
               ...entries[pendingAssistantIndex],
               text: "",
+              rendered_html: null,
               streaming: true,
               placeholder: true
             };
@@ -1180,6 +1274,7 @@ pub fn default_client_html() -> &'static str {
               role: "assistant",
               status: "pending",
               text: "",
+              rendered_html: null,
               attachments: [],
               streaming: true,
               placeholder: true
@@ -1200,9 +1295,7 @@ pub fn default_client_html() -> &'static str {
           const statusLabel = message.streaming
             ? '<span class="streaming-indicator">Streaming</span>'
             : escapeHtml(titleCase(message.status));
-          const textBody = message.placeholder
-            ? '<div class="message-body"><span class="streaming-indicator">Thinking</span></div>'
-            : (message.text ? `<div class="message-body">${escapeHtml(message.text)}</div>` : "");
+          const textBody = renderMessageBody(message);
           const attachments = renderAttachments(message.attachments || []);
           const body = `${textBody}${attachments}`;
 
@@ -1218,6 +1311,11 @@ pub fn default_client_html() -> &'static str {
             </div>
           `;
         }).join("");
+
+        elements.messages.querySelectorAll(".message-body a").forEach(link => {
+          link.setAttribute("target", "_blank");
+          link.setAttribute("rel", "noreferrer");
+        });
 
         if (shouldStick) {
           scrollMessagesToBottom();
