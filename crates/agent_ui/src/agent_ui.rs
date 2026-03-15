@@ -95,6 +95,8 @@ actions!(
         ToggleOptionsMenu,
         /// Opens the mobile companion controls and shares the current agent session when available.
         ShareMobileCompanion,
+        /// Opens the running mobile companion link in the system browser.
+        OpenMobileCompanionLocally,
         /// Stops the mobile companion service.
         StopMobileCompanion,
         /// Toggles the profile or mode selector for switching between agent profiles.

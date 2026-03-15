@@ -38,9 +38,9 @@ use crate::ui::{
 use crate::{
     AddContextServer, AgentDiffPane, ConnectionView, CopyThreadToClipboard, CycleStartThreadIn,
     Follow, InlineAssistant, LoadThreadFromClipboard, NewTextThread, NewThread,
-    OpenActiveThreadAsMarkdown, OpenAgentDiff, OpenHistory, ResetTrialEndUpsell, ResetTrialUpsell,
-    ShareMobileCompanion, StartThreadIn, StopMobileCompanion, ToggleNavigationMenu,
-    ToggleNewThreadMenu, ToggleOptionsMenu,
+    OpenActiveThreadAsMarkdown, OpenAgentDiff, OpenHistory, OpenMobileCompanionLocally,
+    ResetTrialEndUpsell, ResetTrialUpsell, ShareMobileCompanion, StartThreadIn,
+    StopMobileCompanion, ToggleNavigationMenu, ToggleNewThreadMenu, ToggleOptionsMenu,
     agent_configuration::{AgentConfiguration, AssistantConfigurationEvent},
     connection_view::{AcpThreadViewEvent, ThreadView},
     slash_command::SlashCommandCompletionProvider,
@@ -402,6 +402,27 @@ pub fn init(cx: &mut App) {
                                 result.map(|_| ())
                             })
                             .detach_and_log_err(cx);
+                    }
+                })
+                .register_action(|_workspace, _: &OpenMobileCompanionLocally, _window, cx| {
+                    let companion_manager = CompanionManager::global(cx);
+                    let workspace = cx.entity().downgrade();
+                    let status = companion_manager.read(cx).status().clone();
+
+                    match (&status.state, status.access_info.as_ref()) {
+                        (CompanionServiceState::Running, Some(access_info)) => {
+                            cx.open_url(&access_info.url);
+                        }
+                        (CompanionServiceState::Starting, _) => AgentPanel::show_toast(
+                            &workspace,
+                            "Mobile companion is still starting",
+                            cx,
+                        ),
+                        _ => AgentPanel::show_toast(
+                            &workspace,
+                            "Start mobile companion sharing before opening it locally",
+                            cx,
+                        ),
                     }
                 })
                 .register_action(|_workspace, _: &StopMobileCompanion, window, cx| {

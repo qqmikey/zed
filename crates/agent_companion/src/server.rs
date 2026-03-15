@@ -14,9 +14,11 @@ use axum::{
     routing::{get, post},
 };
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use paths::data_dir;
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
+    path::{Path as StdPath, PathBuf},
     sync::{Arc, RwLock},
 };
 use tokio::{
@@ -58,6 +60,7 @@ pub struct CompanionServerHandle {
     event_tx: broadcast::Sender<CompanionEvent>,
     access_mode: Arc<RwLock<CompanionAccessMode>>,
     assets: Arc<RwLock<HashMap<String, CompanionAsset>>>,
+    asset_storage_dir: PathBuf,
     shutdown_tx: watch::Sender<bool>,
     join_handle: JoinHandle<Result<()>>,
     access_info: crate::CompanionAccessInfo,
@@ -84,8 +87,10 @@ impl CompanionServerHandle {
 
     pub fn replace_assets(&self, assets: Vec<CompanionAsset>) {
         if let Ok(mut registered_assets) = self.assets.write() {
+            let previous_assets = registered_assets.clone();
             *registered_assets = assets
                 .into_iter()
+                .map(|asset| materialize_asset(asset, &previous_assets, &self.asset_storage_dir))
                 .map(|asset| (asset.id.clone(), asset))
                 .collect();
         }
@@ -132,9 +137,14 @@ pub async fn start_server(
     let (command_tx, command_rx) = mpsc::unbounded();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let access_mode = Arc::new(RwLock::new(access_mode));
+    let asset_storage_dir = companion_asset_storage_dir(&token_id);
     let assets = Arc::new(RwLock::new(
         initial_assets
             .into_iter()
+            .map(|asset| {
+                let existing_assets = HashMap::new();
+                materialize_asset(asset, &existing_assets, &asset_storage_dir)
+            })
             .map(|asset| (asset.id.clone(), asset))
             .collect(),
     ));
@@ -183,6 +193,7 @@ pub async fn start_server(
             event_tx,
             access_mode,
             assets,
+            asset_storage_dir,
             shutdown_tx,
             join_handle,
             access_info,
@@ -459,6 +470,72 @@ fn discover_lan_host() -> String {
         Ok(IpAddr::V6(ip)) if !ip.is_loopback() => ip.to_string(),
         Ok(_) | Err(_) => Ipv4Addr::LOCALHOST.to_string(),
     }
+}
+
+fn companion_asset_storage_dir(token_id: &str) -> PathBuf {
+    data_dir().join("mobile_companion_assets").join(token_id)
+}
+
+fn materialize_asset(
+    asset: CompanionAsset,
+    previous_assets: &HashMap<String, CompanionAsset>,
+    asset_storage_dir: &StdPath,
+) -> CompanionAsset {
+    let CompanionAssetSource::File(source_path) = &asset.source else {
+        return asset;
+    };
+
+    if source_path.starts_with(asset_storage_dir) {
+        return asset;
+    }
+
+    if let Some(previous_asset) = previous_assets.get(&asset.id)
+        && previous_asset.name == asset.name
+        && previous_asset.mime_type == asset.mime_type
+        && previous_asset.disposition == asset.disposition
+        && let CompanionAssetSource::File(previous_path) = &previous_asset.source
+        && previous_path.starts_with(asset_storage_dir)
+        && previous_path.exists()
+    {
+        return previous_asset.clone();
+    }
+
+    let Ok(materialized_path) =
+        copy_asset_to_storage(source_path, asset_storage_dir, &asset.id, &asset.name)
+    else {
+        return asset;
+    };
+
+    CompanionAsset {
+        source: CompanionAssetSource::File(materialized_path),
+        ..asset
+    }
+}
+
+fn copy_asset_to_storage(
+    source_path: &StdPath,
+    asset_storage_dir: &StdPath,
+    asset_id: &str,
+    asset_name: &str,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(asset_storage_dir)
+        .context("failed to create mobile companion asset storage directory")?;
+
+    let file_name = format!("{asset_id}-{}", sanitize_filename(asset_name));
+    let destination_path = asset_storage_dir.join(file_name);
+
+    if destination_path.exists() {
+        return Ok(destination_path);
+    }
+
+    std::fs::copy(source_path, &destination_path).with_context(|| {
+        format!(
+            "failed to copy companion asset from {}",
+            source_path.display()
+        )
+    })?;
+
+    Ok(destination_path)
 }
 
 fn sanitize_filename(name: &str) -> String {

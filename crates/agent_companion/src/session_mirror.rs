@@ -1529,7 +1529,8 @@ fn render_companion_markdown(
         };
     }
 
-    let autolinked_text = autolink_standalone_local_paths_for_markdown(text);
+    let normalized_text = normalize_local_markdown_destinations(text);
+    let autolinked_text = autolink_standalone_local_paths_for_markdown(&normalized_text);
     let mut events = Vec::new();
     let mut assets = Vec::new();
     for event in Parser::new_ext(&autolinked_text, companion_markdown_options()) {
@@ -1551,6 +1552,72 @@ fn render_companion_markdown(
     }
 }
 
+fn normalize_local_markdown_destinations(text: &str) -> String {
+    let mut output = String::new();
+    let mut in_fenced_code_block = false;
+
+    for line in text.split_inclusive('\n') {
+        let trimmed_line = line.trim_end_matches(['\r', '\n']);
+        let line_ending = &line[trimmed_line.len()..];
+        let trimmed = trimmed_line.trim();
+
+        if trimmed.starts_with("```") {
+            in_fenced_code_block = !in_fenced_code_block;
+            output.push_str(line);
+            continue;
+        }
+
+        if in_fenced_code_block {
+            output.push_str(line);
+            continue;
+        }
+
+        output.push_str(&normalize_local_markdown_destinations_in_line(trimmed_line));
+        output.push_str(line_ending);
+    }
+
+    output
+}
+
+fn normalize_local_markdown_destinations_in_line(line: &str) -> String {
+    let mut output = String::new();
+    let mut cursor = 0;
+
+    while let Some(relative_start) = line[cursor..].find("](") {
+        let destination_start = cursor + relative_start + 2;
+        let Some(relative_end) = line[destination_start..].find(')') else {
+            output.push_str(&line[cursor..]);
+            return output;
+        };
+        let destination_end = destination_start + relative_end;
+        let destination = &line[destination_start..destination_end];
+
+        output.push_str(&line[cursor..destination_start]);
+        output.push_str(&normalized_local_markdown_destination(destination));
+        output.push(')');
+
+        cursor = destination_end + 1;
+    }
+
+    output.push_str(&line[cursor..]);
+    output
+}
+
+fn normalized_local_markdown_destination(destination: &str) -> String {
+    let trimmed = destination.trim();
+    let Some(path) = local_file_path_from_link_target(trimmed).filter(|path| path.exists()) else {
+        return destination.to_string();
+    };
+
+    if !path.is_absolute() {
+        return destination.to_string();
+    }
+
+    Url::from_file_path(&path)
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| destination.to_string())
+}
+
 fn autolink_standalone_local_paths_for_markdown(text: &str) -> String {
     let mut output = String::new();
     let mut in_fenced_code_block = false;
@@ -1570,7 +1637,8 @@ fn autolink_standalone_local_paths_for_markdown(text: &str) -> String {
             && !trimmed.is_empty()
             && !trimmed.starts_with('[')
             && !trimmed.starts_with('!')
-            && let Some(path) = local_file_path_from_link_target(trimmed)
+            && let Some(path) =
+                local_file_path_from_link_target(trimmed).filter(|path| path.exists())
             && path.is_absolute()
         {
             let escaped_label = trimmed.replace('\\', "\\\\").replace(']', "\\]");
@@ -1933,6 +2001,32 @@ mod tests {
     }
 
     #[test]
+    fn markdown_image_paths_with_spaces_render_inline() {
+        let directory = std::env::temp_dir().join(format!("zed companion {}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let path = directory.join("image with spaces.png");
+        std::fs::write(&path, b"png").expect("write test image");
+
+        let mut attachment_index = 0;
+        let rendered = render_companion_markdown(
+            &format!("![space image]({})", path.display()),
+            "message-spaces",
+            &mut attachment_index,
+            "token-1",
+        );
+
+        assert_eq!(rendered.assets.len(), 1);
+        assert_eq!(attachment_index, 1);
+        assert_eq!(
+            rendered.rendered_html,
+            Some(
+                "<p><img src=\"/companion/assets/message-spaces-asset-0?token=token-1\" alt=\"space image\" /></p>\n"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
     fn markdown_file_links_stay_in_text_and_become_clickable() {
         let path = write_test_file("txt", b"report");
         let mut attachment_index = 0;
@@ -1951,6 +2045,28 @@ mod tests {
                 "<p>Artifact: <a href=\"/companion/assets/message-4-asset-0?token=token-1\">report.txt</a></p>\n"
                     .into()
             )
+        );
+    }
+
+    #[test]
+    fn prose_that_starts_with_a_local_path_does_not_become_a_link() {
+        let path = write_test_file("png", b"png");
+        let mut attachment_index = 0;
+        let rendered = render_companion_markdown(
+            &format!("{} Please send this image to me.", path.display()),
+            "message-plain-path-prose",
+            &mut attachment_index,
+            "token-1",
+        );
+
+        assert!(rendered.assets.is_empty());
+        assert_eq!(attachment_index, 0);
+        assert_eq!(
+            rendered.rendered_html,
+            Some(format!(
+                "<p>{} Please send this image to me.</p>\n",
+                path.display()
+            ))
         );
     }
 

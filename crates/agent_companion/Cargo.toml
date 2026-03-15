@@ -23,6 +23,7 @@ futures.workspace = true
 gpui.workspace = true
 gpui_tokio.workspace = true
 language_model.workspace = true
+paths.workspace = true
 pulldown-cmark = { workspace = true, features = ["html"] }
 regex.workspace = true
 serde.workspace = true

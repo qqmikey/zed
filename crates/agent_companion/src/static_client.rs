@@ -1028,7 +1028,9 @@ pub fn default_client_html() -> &'static str {
         selectedPermissionChoiceIndices: {},
         expandedToolCalls: {},
         socket: null,
-        forceScrollToBottom: true
+        forceScrollToBottom: true,
+        isPinnedToBottom: true,
+        scrollToBottomFrame: null
       };
 
       const elements = {
@@ -1427,14 +1429,52 @@ pub fn default_client_html() -> &'static str {
       }
 
       function shouldAutoScroll() {
-        const threshold = 64;
-        const distanceFromBottom =
-          elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight;
-        return state.forceScrollToBottom || distanceFromBottom <= threshold;
+        return state.forceScrollToBottom || state.isPinnedToBottom;
       }
 
       function scrollMessagesToBottom() {
         elements.messages.scrollTop = elements.messages.scrollHeight;
+      }
+
+      function distanceFromBottom() {
+        return (
+          elements.messages.scrollHeight -
+          elements.messages.scrollTop -
+          elements.messages.clientHeight
+        );
+      }
+
+      function updatePinnedToBottom() {
+        state.isPinnedToBottom = distanceFromBottom() <= 64;
+      }
+
+      function scheduleScrollToBottom() {
+        if (state.scrollToBottomFrame !== null) {
+          window.cancelAnimationFrame(state.scrollToBottomFrame);
+        }
+
+        state.scrollToBottomFrame = window.requestAnimationFrame(() => {
+          state.scrollToBottomFrame = window.requestAnimationFrame(() => {
+            state.scrollToBottomFrame = null;
+            scrollMessagesToBottom();
+            state.forceScrollToBottom = false;
+            state.isPinnedToBottom = true;
+          });
+        });
+      }
+
+      function bindTimelineMediaEvents() {
+        elements.messages.querySelectorAll(".message-body img, .attachment-image img").forEach(image => {
+          if (image.complete) {
+            return;
+          }
+
+          image.addEventListener("load", () => {
+            if (state.forceScrollToBottom || state.isPinnedToBottom) {
+              scheduleScrollToBottom();
+            }
+          }, { once: true });
+        });
       }
 
       function lastPendingAssistantIndex(entries) {
@@ -1723,10 +1763,13 @@ pub fn default_client_html() -> &'static str {
           link.setAttribute("rel", "noreferrer");
         });
 
+        bindTimelineMediaEvents();
+
         if (shouldStick) {
-          scrollMessagesToBottom();
+          scheduleScrollToBottom();
+        } else {
+          state.forceScrollToBottom = false;
         }
-        state.forceScrollToBottom = false;
       }
 
       function renderActionButton() {
@@ -1854,6 +1897,7 @@ pub fn default_client_html() -> &'static str {
           const newScrollHeight = elements.messages.scrollHeight;
           elements.messages.scrollTop =
             newScrollHeight - previousScrollHeight + previousScrollTop;
+          updatePinnedToBottom();
         } catch (error) {
           pushEvent(`Failed to load older activity: ${error}`, "error");
         } finally {
@@ -1970,6 +2014,7 @@ pub fn default_client_html() -> &'static str {
           state.pendingAttachments = [];
           elements.attachmentInput.value = "";
           state.forceScrollToBottom = true;
+          state.isPinnedToBottom = true;
           pushEvent("Message sent to the active Zed session.", "success");
         } catch (error) {
           pushEvent(`Failed to send message: ${error}`, "error");
@@ -2097,6 +2142,7 @@ pub fn default_client_html() -> &'static str {
       });
 
       elements.messages.addEventListener("scroll", () => {
+        updatePinnedToBottom();
         if (elements.messages.scrollTop <= olderMessagesThreshold) {
           loadOlderTimeline();
         }
