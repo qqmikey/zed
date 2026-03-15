@@ -561,6 +561,7 @@ mod tests {
             tool_permissions,
             show_turn_stats: false,
             new_thread_location: Default::default(),
+            mobile_companion: Default::default(),
         }
     }
 
