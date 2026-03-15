@@ -2519,10 +2519,11 @@ pub fn default_client_html() -> &'static str {
         });
 
         if (!response.ok) {
+          const errorText = (await response.text()).trim();
           if (response.status === 413) {
             throw new Error("Attachments exceed the companion upload request limit. Try fewer or smaller files.");
           }
-          throw new Error(`Command failed with status ${response.status}`);
+          throw new Error(errorText || `Command failed with status ${response.status}`);
         }
       }
 
@@ -2734,7 +2735,7 @@ pub fn default_client_html() -> &'static str {
 
         try {
           await postCommand({ type: "stop_run" });
-          pushEvent("Stop requested.", "success");
+          pushEvent("Stop request sent to the active Zed session.", "success");
         } catch (error) {
           pushEvent(`Failed to stop run: ${error}`, "error");
         }

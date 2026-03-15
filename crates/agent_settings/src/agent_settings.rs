@@ -20,6 +20,7 @@ pub use crate::agent_profile::*;
 pub const SUMMARIZE_THREAD_PROMPT: &str = include_str!("prompts/summarize_thread_prompt.txt");
 pub const SUMMARIZE_THREAD_DETAILED_PROMPT: &str =
     include_str!("prompts/summarize_thread_detailed_prompt.txt");
+pub const DEFAULT_MOBILE_COMPANION_PORT: u16 = 54321;
 
 #[derive(Clone, Debug, RegisterSetting)]
 pub struct AgentSettings {
@@ -94,6 +95,7 @@ impl AgentSettings {
 pub struct MobileCompanionSettings {
     pub auto_start: bool,
     pub follow_active_session: bool,
+    pub port: u16,
 }
 
 impl Default for MobileCompanionSettings {
@@ -101,6 +103,7 @@ impl Default for MobileCompanionSettings {
         Self {
             auto_start: false,
             follow_active_session: true,
+            port: DEFAULT_MOBILE_COMPANION_PORT,
         }
     }
 }
@@ -461,6 +464,10 @@ impl Settings for AgentSettings {
                 .map(|settings| MobileCompanionSettings {
                     auto_start: settings.auto_start.unwrap_or(false),
                     follow_active_session: settings.follow_active_session.unwrap_or(true),
+                    port: settings
+                        .port
+                        .filter(|port| *port != 0)
+                        .unwrap_or(DEFAULT_MOBILE_COMPANION_PORT),
                 })
                 .unwrap_or_default(),
         }

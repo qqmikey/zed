@@ -21,6 +21,7 @@ pub struct MobileCompanionModal {
 
 impl MobileCompanionModal {
     pub fn show(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
+        CompanionManager::init(cx);
         let workspace = workspace.clone();
         window.defer(cx, move |window, cx| {
             workspace.update(cx, |workspace, cx| {
@@ -240,7 +241,7 @@ impl MobileCompanionModal {
                                     )
                                     .child(
                                         Label::new(
-                                            "This token survives restarts. The host and port still follow the current running companion session.",
+                                            "This link reuses a persistent token on the configured port, so it survives Zed restarts. If your machine gets a new network address, copy the updated link again.",
                                         )
                                         .size(LabelSize::Small)
                                         .color(Color::Muted),
@@ -261,8 +262,49 @@ impl MobileCompanionModal {
                     .into_any_element()
             }
             CompanionServiceState::Stopped => {
-                Label::new("The mobile companion service is not running for this workspace.")
-                    .color(Color::Muted)
+                v_flex()
+                    .gap_2()
+                    .child(
+                        Label::new("The mobile companion service is not running for this workspace.")
+                            .color(Color::Muted),
+                    )
+                    .when_some(
+                        status
+                            .persistent_access_info
+                            .as_ref()
+                            .map(|info| info.url.clone()),
+                        |this, url| {
+                            this.child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(
+                                        Label::new("Stable link")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(
+                                        div()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(cx.theme().colors().border_variant)
+                                            .bg(cx.theme().colors().editor_background)
+                                            .p_3()
+                                            .child(
+                                                Label::new(url)
+                                                    .buffer_font(cx)
+                                                    .size(LabelSize::Small),
+                                            ),
+                                    )
+                                    .child(
+                                        Label::new(
+                                            "This link is reserved for the configured port and will work again after you start sharing.",
+                                        )
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                    ),
+                            )
+                        },
+                    )
                     .into_any_element()
             }
             CompanionServiceState::Failed { message } => v_flex()
@@ -274,6 +316,43 @@ impl MobileCompanionModal {
                     Label::new(message.clone())
                         .size(LabelSize::Small)
                         .color(Color::Muted),
+                )
+                .when_some(
+                    status
+                        .persistent_access_info
+                        .as_ref()
+                        .map(|info| info.url.clone()),
+                    |this, url| {
+                        this.child(
+                            v_flex()
+                                .gap_2()
+                                .child(
+                                    Label::new("Stable link")
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    div()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(cx.theme().colors().border_variant)
+                                        .bg(cx.theme().colors().editor_background)
+                                        .p_3()
+                                        .child(
+                                            Label::new(url)
+                                                .buffer_font(cx)
+                                                .size(LabelSize::Small),
+                                        ),
+                                )
+                                .child(
+                                    Label::new(
+                                        "Fix the startup problem, then start sharing again to reactivate this link.",
+                                    )
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                                ),
+                        )
+                    },
                 )
                 .into_any_element(),
         };
@@ -361,6 +440,7 @@ impl Render for MobileCompanionModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status = self.companion_manager.read(cx).status().clone();
         let is_running = matches!(status.state, CompanionServiceState::Running);
+        let has_stable_link = status.persistent_access_info.is_some();
         let is_stopped = matches!(
             status.state,
             CompanionServiceState::Stopped | CompanionServiceState::Failed { .. }
@@ -421,7 +501,7 @@ impl Render for MobileCompanionModal {
                                             "Copy Stable Link",
                                         )
                                         .on_click(cx.listener(Self::copy_persistent_url))
-                                        .disabled(!is_running),
+                                        .disabled(!has_stable_link),
                                     )
                                     .child(
                                         Button::new(
@@ -434,8 +514,8 @@ impl Render for MobileCompanionModal {
                                                 .color(Color::Muted),
                                         )
                                         .on_click(cx.listener(Self::open_persistent_url))
-                                        .disabled(!is_running),
-                                    ),
+                                        .disabled(!is_running || !has_stable_link),
+                                    )
                             )
                             .end_slot(
                                 h_flex()

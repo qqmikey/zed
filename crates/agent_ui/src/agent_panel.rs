@@ -205,6 +205,7 @@ struct SerializedActiveThread {
 }
 
 pub fn init(cx: &mut App) {
+    CompanionManager::init(cx);
     cx.observe_new(
         |workspace: &mut Workspace, _window, _cx: &mut Context<Workspace>| {
             workspace
@@ -366,7 +367,14 @@ pub fn init(cx: &mut App) {
                 })
                 .register_action(|workspace, _: &ShareMobileCompanion, window, cx| {
                     let workspace_entity = cx.entity().clone();
-                    let companion_manager = CompanionManager::global(cx);
+                    let Some(companion_manager) = CompanionManager::try_global(cx) else {
+                        AgentPanel::show_toast(
+                            &workspace_entity.downgrade(),
+                            "Mobile companion is unavailable in this workspace",
+                            cx,
+                        );
+                        return;
+                    };
 
                     if let Some(source) = workspace
                         .panel::<AgentPanel>(cx)
@@ -405,7 +413,9 @@ pub fn init(cx: &mut App) {
                     }
                 })
                 .register_action(|_workspace, _: &OpenMobileCompanionLocally, _window, cx| {
-                    let companion_manager = CompanionManager::global(cx);
+                    let Some(companion_manager) = CompanionManager::try_global(cx) else {
+                        return;
+                    };
                     let workspace = cx.entity().downgrade();
                     let status = companion_manager.read(cx).status().clone();
 
@@ -426,7 +436,9 @@ pub fn init(cx: &mut App) {
                     }
                 })
                 .register_action(|_workspace, _: &StopMobileCompanion, window, cx| {
-                    let companion_manager = CompanionManager::global(cx);
+                    let Some(companion_manager) = CompanionManager::try_global(cx) else {
+                        return;
+                    };
                     if matches!(
                         companion_manager.read(cx).status().state,
                         CompanionServiceState::Stopped | CompanionServiceState::Starting
@@ -993,7 +1005,7 @@ pub struct AgentPanel {
     _thread_view_subscription: Option<Subscription>,
     _active_thread_focus_subscription: Option<Subscription>,
     _worktree_creation_task: Option<Task<()>>,
-    _companion_manager_subscription: Subscription,
+    _companion_manager_subscription: Option<Subscription>,
     show_trust_workspace_message: bool,
     last_configuration_error_telemetry: Option<String>,
     on_boarding_upsell_dismissed: AtomicBool,
@@ -1294,10 +1306,11 @@ impl AgentPanel {
             );
             store
         });
-        let companion_manager = CompanionManager::global(cx);
         let companion_manager_subscription =
-            cx.subscribe(&companion_manager, |_, _, _: &CompanionManagerEvent, cx| {
-                cx.notify();
+            CompanionManager::try_global(cx).map(|companion_manager| {
+                cx.subscribe(&companion_manager, |_, _, _: &CompanionManagerEvent, cx| {
+                    cx.notify();
+                })
             });
         let mut panel = Self {
             workspace_id,
@@ -2226,12 +2239,13 @@ impl AgentPanel {
     }
 
     fn sync_companion_source(&mut self, cx: &mut Context<Self>) {
-        let Some(source) = self.companion_session_source(cx) else {
+        let Some(companion_manager) = CompanionManager::try_global(cx) else {
             return;
         };
+        let source = self.companion_session_source(cx);
 
-        CompanionManager::global(cx).update(cx, |manager, cx| {
-            manager.set_follow_source(Some(source), cx);
+        companion_manager.update(cx, |manager, cx| {
+            manager.set_follow_source(source, cx);
         });
     }
 
@@ -3602,7 +3616,8 @@ impl AgentPanel {
             ActiveView::AgentThread { server_view } => server_view.read(cx).has_auth_methods(),
             _ => false,
         };
-        let companion_status = CompanionManager::global(cx).read(cx).status().clone();
+        let companion_status =
+            CompanionManager::try_global(cx).map(|manager| manager.read(cx).status().clone());
 
         PopoverMenu::new("agent-options-menu")
             .trigger_with_tooltip(
@@ -3678,25 +3693,31 @@ impl AgentPanel {
                             .separator()
                             .action(full_screen_label, Box::new(ToggleZoom));
 
-                        menu = menu.separator().header("Mobile Companion");
+                        if let Some(companion_status) = &companion_status {
+                            menu = menu.separator().header("Mobile Companion");
 
-                        menu = match &companion_status.state {
-                            CompanionServiceState::Stopped => {
-                                menu.action("Show Mobile Companion", Box::new(ShareMobileCompanion))
-                            }
-                            CompanionServiceState::Starting => {
-                                menu.label("Starting Mobile Companion…")
-                            }
-                            CompanionServiceState::Running => menu
-                                .action("Show Mobile Companion", Box::new(ShareMobileCompanion))
-                                .action("Stop Mobile Companion", Box::new(StopMobileCompanion)),
-                            CompanionServiceState::Stopping => {
-                                menu.label("Stopping Mobile Companion…")
-                            }
-                            CompanionServiceState::Failed { .. } => menu
-                                .label("Mobile Companion failed to start")
-                                .action("Show Mobile Companion", Box::new(ShareMobileCompanion)),
-                        };
+                            menu = match &companion_status.state {
+                                CompanionServiceState::Stopped => menu.action(
+                                    "Show Mobile Companion",
+                                    Box::new(ShareMobileCompanion),
+                                ),
+                                CompanionServiceState::Starting => {
+                                    menu.label("Starting Mobile Companion…")
+                                }
+                                CompanionServiceState::Running => menu
+                                    .action("Show Mobile Companion", Box::new(ShareMobileCompanion))
+                                    .action("Stop Mobile Companion", Box::new(StopMobileCompanion)),
+                                CompanionServiceState::Stopping => {
+                                    menu.label("Stopping Mobile Companion…")
+                                }
+                                CompanionServiceState::Failed { .. } => {
+                                    menu.label("Mobile Companion failed to start").action(
+                                        "Show Mobile Companion",
+                                        Box::new(ShareMobileCompanion),
+                                    )
+                                }
+                            };
+                        }
 
                         if has_auth_methods {
                             menu = menu.action("Reauthenticate", Box::new(ReauthenticateAgent))
@@ -5458,6 +5479,7 @@ mod tests {
     use crate::connection_view::tests::{StubAgentServer, init_test};
     use crate::test_support::{active_session_id, open_thread_with_connection, send_message};
     use acp_thread::{StubAgentConnection, ThreadStatus};
+    use agent_companion::CompanionManager;
     use assistant_text_thread::TextThreadStore;
     use feature_flags::FeatureFlagAppExt;
     use fs::FakeFs;
@@ -6101,6 +6123,39 @@ mod tests {
             assert!(
                 !panel.background_threads.contains_key(&session_id_b),
                 "Thread B (idle) should not have been retained in background_views"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_sync_companion_source_clears_followed_session_without_active_thread(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+
+        open_thread_with_connection(&panel, StubAgentConnection::new(), &mut cx);
+
+        let companion_manager = cx
+            .read(|cx| CompanionManager::try_global(cx))
+            .expect("companion manager should be initialized");
+
+        cx.read(|cx| {
+            assert!(
+                companion_manager.read(cx).status().shared_session.is_some(),
+                "active thread should be mirrored into the companion manager"
+            );
+        });
+
+        panel.update(&mut cx, |panel, cx| {
+            panel.active_view = ActiveView::Uninitialized;
+            panel.sync_companion_source(cx);
+        });
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            assert!(
+                companion_manager.read(cx).status().shared_session.is_none(),
+                "followed companion session should clear when the panel has no active thread"
             );
         });
     }

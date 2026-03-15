@@ -25,7 +25,7 @@ use std::{
 use tokio::{
     fs,
     net::TcpListener,
-    sync::{broadcast, watch},
+    sync::{broadcast, oneshot, watch},
     task::JoinHandle,
 };
 
@@ -45,15 +45,21 @@ pub struct CompanionServerState {
     authorized_tokens: Arc<HashSet<String>>,
     snapshot_rx: watch::Receiver<CompanionSnapshot>,
     event_tx: broadcast::Sender<CompanionEvent>,
-    command_tx: UnboundedSender<CompanionCommand>,
+    command_tx: UnboundedSender<CompanionCommandRequest>,
     access_mode: Arc<RwLock<CompanionAccessMode>>,
     assets: Arc<RwLock<HashMap<String, CompanionAsset>>>,
     client_html: Arc<str>,
 }
 
+pub struct CompanionCommandRequest {
+    pub command: CompanionCommand,
+    pub response_tx: oneshot::Sender<std::result::Result<(), String>>,
+}
+
 pub struct CompanionServerStart {
     pub handle: CompanionServerHandle,
-    pub command_rx: UnboundedReceiver<CompanionCommand>,
+    pub command_rx: UnboundedReceiver<CompanionCommandRequest>,
+    pub connect_host: String,
 }
 
 pub struct CompanionServerHandle {
@@ -124,12 +130,14 @@ pub async fn start_server(
     initial_assets: Vec<CompanionAsset>,
     token_id: String,
     persistent_token_id: String,
+    port: u16,
     access_mode: CompanionAccessMode,
     client_html: String,
 ) -> Result<CompanionServerStart> {
-    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
+    let bind_address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    let listener = TcpListener::bind(bind_address)
         .await
-        .context("failed to bind companion server listener")?;
+        .with_context(|| format!("failed to bind companion server listener to port {port}"))?;
     let local_addr = listener
         .local_addr()
         .context("failed to read companion server address")?;
@@ -185,13 +193,7 @@ pub async fn start_server(
     });
 
     let connect_host = discover_lan_host();
-    let access_info = crate::CompanionAccessInfo {
-        url: format!(
-            "http://{connect_host}:{}/companion?token={token_id}",
-            local_addr.port()
-        ),
-        token_id,
-    };
+    let access_info = build_access_info(&connect_host, local_addr.port(), &token_id);
 
     Ok(CompanionServerStart {
         handle: CompanionServerHandle {
@@ -205,11 +207,27 @@ pub async fn start_server(
             access_info,
         },
         command_rx,
+        connect_host,
     })
 }
 
 pub fn default_client_html() -> &'static str {
     static_client::default_client_html()
+}
+
+pub(crate) fn build_access_info(
+    connect_host: &str,
+    port: u16,
+    token_id: &str,
+) -> crate::CompanionAccessInfo {
+    crate::CompanionAccessInfo {
+        url: build_companion_url(connect_host, port, token_id),
+        token_id: token_id.to_string(),
+    }
+}
+
+pub(crate) fn build_companion_url(connect_host: &str, port: u16, token_id: &str) -> String {
+    format!("http://{connect_host}:{port}/companion?token={token_id}")
 }
 
 fn router(state: CompanionServerState) -> Router {
@@ -272,16 +290,36 @@ async fn companion_command(
     State(state): State<CompanionServerState>,
     Query(query): Query<CompanionAuthQuery>,
     Json(command): Json<CompanionCommand>,
-) -> Result<StatusCode, StatusCode> {
-    authorize(&state, &query)?;
+) -> Result<StatusCode, (StatusCode, String)> {
+    authorize(&state, &query).map_err(|status| (status, "Unauthorized.".into()))?;
     if current_access_mode(&state) == CompanionAccessMode::ReadOnly {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Mobile companion is in read-only mode.".into(),
+        ));
     }
+    let (response_tx, response_rx) = oneshot::channel();
     state
         .command_tx
-        .unbounded_send(command)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    Ok(StatusCode::ACCEPTED)
+        .unbounded_send(CompanionCommandRequest {
+            command,
+            response_tx,
+        })
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Mobile companion is unavailable.".into(),
+            )
+        })?;
+
+    match response_rx.await {
+        Ok(Ok(())) => Ok(StatusCode::NO_CONTENT),
+        Ok(Err(message)) => Err((StatusCode::CONFLICT, message)),
+        Err(_) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Mobile companion stopped before finishing the command.".into(),
+        )),
+    }
 }
 
 async fn companion_events(
@@ -465,7 +503,7 @@ fn timeline_entry_id(entry: &CompanionTimelineEntry) -> &str {
     }
 }
 
-fn discover_lan_host() -> String {
+pub(crate) fn discover_lan_host() -> String {
     let Ok(socket) = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))) else {
         return Ipv4Addr::LOCALHOST.to_string();
     };
@@ -589,7 +627,7 @@ mod tests {
 
     fn test_state() -> (
         CompanionServerState,
-        futures::channel::mpsc::UnboundedReceiver<CompanionCommand>,
+        futures::channel::mpsc::UnboundedReceiver<super::CompanionCommandRequest>,
     ) {
         let (snapshot_tx, snapshot_rx) = watch::channel(CompanionSnapshot {
             protocol_version: 1,
@@ -837,8 +875,8 @@ mod tests {
     async fn command_route_forwards_payload() {
         let (state, mut command_rx) = test_state();
         let app = router(state);
-        let response = app
-            .oneshot(
+        let response = tokio::spawn(async move {
+            app.oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/companion/command?token=test-token")
@@ -853,17 +891,21 @@ mod tests {
                     .expect("request"),
             )
             .await
-            .expect("response");
+            .expect("response")
+        });
 
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let command = command_rx.next().await.expect("command");
+        let request = command_rx.next().await.expect("command");
         assert_eq!(
-            command,
+            request.command,
             CompanionCommand::SendMessage {
                 text: "hello from mobile".into(),
                 attachments: Vec::new(),
             }
         );
+        request.response_tx.send(Ok(())).expect("response sent");
+
+        let response = response.await.expect("join");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -893,20 +935,15 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(!matches!(
-            command_rx.next().now_or_never(),
-            Some(Some(CompanionCommand::SendMessage { .. }))
-                | Some(Some(CompanionCommand::AuthorizeToolCall { .. }))
-                | Some(Some(CompanionCommand::StopRun))
-        ));
+        assert!(!matches!(command_rx.next().now_or_never(), Some(Some(_))));
     }
 
     #[tokio::test]
     async fn command_route_forwards_authorize_payload() {
         let (state, mut command_rx) = test_state();
         let app = router(state);
-        let response = app
-            .oneshot(
+        let response = tokio::spawn(async move {
+            app.oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/companion/command?token=test-token")
@@ -922,26 +959,30 @@ mod tests {
                     .expect("request"),
             )
             .await
-            .expect("response");
+            .expect("response")
+        });
 
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let command = command_rx.next().await.expect("command");
+        let request = command_rx.next().await.expect("command");
         assert_eq!(
-            command,
+            request.command,
             CompanionCommand::AuthorizeToolCall {
                 tool_call_id: "tool-1".into(),
                 option_id: "allow".into(),
                 option_kind: "AllowOnce".into(),
             }
         );
+        request.response_tx.send(Ok(())).expect("response sent");
+
+        let response = response.await.expect("join");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
     async fn command_route_accepts_large_attachment_payload() {
         let (state, mut command_rx) = test_state();
         let app = router(state);
-        let response = app
-            .oneshot(
+        let response = tokio::spawn(async move {
+            app.oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/companion/command?token=test-token")
@@ -960,17 +1001,53 @@ mod tests {
                     .expect("request"),
             )
             .await
-            .expect("response");
+            .expect("response")
+        });
 
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-        let command = command_rx.next().await.expect("command");
-        match command {
+        let request = command_rx.next().await.expect("command");
+        match request.command {
             CompanionCommand::SendMessage { attachments, .. } => {
                 assert_eq!(attachments.len(), 1);
                 assert_eq!(attachments[0].name, "large.png");
             }
             other => panic!("unexpected command: {other:?}"),
         }
+        request.response_tx.send(Ok(())).expect("response sent");
+
+        let response = response.await.expect("join");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn command_route_returns_execution_error() {
+        let (state, mut command_rx) = test_state();
+        let app = router(state);
+        let response = tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/companion/command?token=test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CompanionCommand::StopRun).expect("json"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+        });
+
+        let request = command_rx.next().await.expect("command");
+        assert_eq!(request.command, CompanionCommand::StopRun);
+        request
+            .response_tx
+            .send(Err("no active companion session".into()))
+            .expect("response sent");
+
+        let response = response.await.expect("join");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body()).await.expect("body");
+        assert_eq!(body.as_ref(), b"no active companion session");
     }
 
     #[tokio::test]

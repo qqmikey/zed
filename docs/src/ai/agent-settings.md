@@ -162,7 +162,8 @@ Use the `agent.mobile_companion` settings to control whether the companion servi
   "agent": {
     "mobile_companion": {
       "auto_start": true,
-      "follow_active_session": true
+      "follow_active_session": true,
+      "port": 54321
     }
   }
 }
@@ -170,6 +171,7 @@ Use the `agent.mobile_companion` settings to control whether the companion servi
 
 - `auto_start` starts the local companion service when Zed launches.
 - `follow_active_session` makes the companion follow the active agent session until you explicitly share a specific session.
+- `port` controls which local-network port the companion binds to. Keep this fixed if you want the stable companion link to survive Zed restarts.
 
 ### Font Size
 

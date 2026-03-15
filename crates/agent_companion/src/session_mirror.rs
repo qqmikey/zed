@@ -1150,12 +1150,22 @@ fn append_resource_link_content(
         return;
     }
 
-    content.attachments.push(CompanionAttachment::Link {
-        id: attachment_id(message_id, *attachment_index),
-        name: attachment_display_name(preferred_name, uri),
-        url: uri.to_string(),
-    });
-    *attachment_index += 1;
+    if let Some(url) = sanitize_attachment_destination(uri) {
+        content.attachments.push(CompanionAttachment::Link {
+            id: attachment_id(message_id, *attachment_index),
+            name: attachment_display_name(preferred_name, uri),
+            url,
+        });
+        *attachment_index += 1;
+        return;
+    }
+
+    let fallback_text = if preferred_name.trim().is_empty() {
+        uri.to_string()
+    } else {
+        preferred_name.to_string()
+    };
+    content.push_text(fallback_text);
 }
 
 fn image_attachment_from_acp(
@@ -1734,6 +1744,16 @@ fn rewrite_markdown_destination(
     CowStr::from(sanitize_markdown_destination(target).unwrap_or_default())
 }
 
+fn sanitize_attachment_destination(target: &str) -> Option<String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let url = Url::parse(trimmed).ok()?;
+    matches!(url.scheme(), "http" | "https" | "mailto" | "tel").then_some(trimmed.to_string())
+}
+
 fn sanitize_markdown_destination(target: &str) -> Option<String> {
     let trimmed = target.trim();
     if trimmed.is_empty() {
@@ -1976,6 +1996,43 @@ mod tests {
             Some(CompanionAttachment::File { .. })
         ));
         assert_eq!(extracted.assets.len(), 1);
+    }
+
+    #[test]
+    fn external_http_resource_links_become_safe_link_attachments() {
+        let extracted = companion_content_from_acp_blocks(
+            &[agent_client_protocol::ContentBlock::ResourceLink(
+                agent_client_protocol::ResourceLink::new(
+                    "Docs",
+                    "https://example.com/docs/agent-companion",
+                ),
+            )],
+            "message-http-link",
+            ResourceBlockFallback::Uri,
+            "token-1",
+        );
+
+        assert!(extracted.text.is_empty());
+        assert!(matches!(
+            extracted.attachments.first(),
+            Some(CompanionAttachment::Link { url, .. }) if url == "https://example.com/docs/agent-companion"
+        ));
+    }
+
+    #[test]
+    fn unsafe_resource_links_fall_back_to_plain_text() {
+        let extracted = companion_content_from_acp_blocks(
+            &[agent_client_protocol::ContentBlock::ResourceLink(
+                agent_client_protocol::ResourceLink::new("Run script", "javascript:alert('owned')"),
+            )],
+            "message-unsafe-link",
+            ResourceBlockFallback::Uri,
+            "token-1",
+        );
+
+        assert_eq!(extracted.text, "Run script");
+        assert!(extracted.attachments.is_empty());
+        assert!(extracted.assets.is_empty());
     }
 
     #[test]

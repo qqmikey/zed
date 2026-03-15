@@ -43,6 +43,10 @@ pub struct MobileCompanionSettingsContent {
     ///
     /// Default: true
     pub follow_active_session: Option<bool>,
+    /// Which port the mobile companion binds to on the local network.
+    ///
+    /// Default: 54321
+    pub port: Option<u16>,
 }
 
 #[with_fallible_options]
