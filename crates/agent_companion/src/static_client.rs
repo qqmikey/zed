@@ -985,6 +985,16 @@ pub fn default_client_html() -> &'static str {
       box-shadow: 0 -14px 30px rgba(0, 0, 0, 0.2);
     }
 
+    .composer.drag-active {
+      border-top-color: rgba(47, 111, 235, 0.42);
+      background:
+        linear-gradient(180deg, rgba(47, 111, 235, 0.08), rgba(255, 255, 255, 0.03)),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.01), rgba(255, 255, 255, 0.03));
+      box-shadow:
+        0 -14px 30px rgba(0, 0, 0, 0.2),
+        inset 0 0 0 1px rgba(47, 111, 235, 0.28);
+    }
+
     textarea {
       width: 100%;
       min-height: 86px;
@@ -1273,6 +1283,7 @@ pub fn default_client_html() -> &'static str {
         reconnectTimer: null,
         reconnectModalOpen: false,
         reconnectInFlight: false,
+        composerDragDepth: 0,
         lightbox: {
           open: false,
           images: [],
@@ -1600,6 +1611,32 @@ pub fn default_client_html() -> &'static str {
             <button class="remove-attachment" type="button" data-attachment-index="${index}">×</button>
           </div>
         `).join("");
+      }
+
+      function hasFilePayload(dataTransfer) {
+        return !!dataTransfer && Array.from(dataTransfer.types || []).includes("Files");
+      }
+
+      function enqueueAttachments(files) {
+        if (!files.length) {
+          return;
+        }
+
+        const accepted = [];
+        for (const file of files) {
+          if (file.size > maxAttachmentBytes) {
+            pushEvent(`${file.name} exceeds the 10 MB companion upload limit.`, "error");
+            continue;
+          }
+          accepted.push(file);
+        }
+
+        if (!accepted.length) {
+          return;
+        }
+
+        state.pendingAttachments = state.pendingAttachments.concat(accepted);
+        render();
       }
 
       function renderPermissionCard() {
@@ -2700,18 +2737,7 @@ pub fn default_client_html() -> &'static str {
         if (!files.length) {
           return;
         }
-
-        const accepted = [];
-        for (const file of files) {
-          if (file.size > maxAttachmentBytes) {
-            pushEvent(`${file.name} exceeds the 10 MB companion upload limit.`, "error");
-            continue;
-          }
-          accepted.push(file);
-        }
-
-        state.pendingAttachments = state.pendingAttachments.concat(accepted);
-        render();
+        enqueueAttachments(files);
       });
 
       elements.selectedAttachments.addEventListener("click", event => {
@@ -2727,6 +2753,55 @@ pub fn default_client_html() -> &'static str {
 
         state.pendingAttachments.splice(index, 1);
         render();
+      });
+
+      elements.composerForm.addEventListener("dragenter", event => {
+        if (!attachmentUploadAvailable() || state.pendingSend || commandAvailable("stop_run")) {
+          return;
+        }
+        if (!hasFilePayload(event.dataTransfer)) {
+          return;
+        }
+        event.preventDefault();
+        state.composerDragDepth += 1;
+        elements.composerForm.classList.add("drag-active");
+      });
+
+      elements.composerForm.addEventListener("dragover", event => {
+        if (!attachmentUploadAvailable() || state.pendingSend || commandAvailable("stop_run")) {
+          return;
+        }
+        if (!hasFilePayload(event.dataTransfer)) {
+          return;
+        }
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+        elements.composerForm.classList.add("drag-active");
+      });
+
+      elements.composerForm.addEventListener("dragleave", event => {
+        if (!hasFilePayload(event.dataTransfer)) {
+          return;
+        }
+        if (!elements.composerForm.contains(event.relatedTarget)) {
+          state.composerDragDepth = Math.max(0, state.composerDragDepth - 1);
+        }
+        if (state.composerDragDepth === 0) {
+          elements.composerForm.classList.remove("drag-active");
+        }
+      });
+
+      elements.composerForm.addEventListener("drop", event => {
+        if (!attachmentUploadAvailable() || state.pendingSend || commandAvailable("stop_run")) {
+          return;
+        }
+        if (!hasFilePayload(event.dataTransfer)) {
+          return;
+        }
+        event.preventDefault();
+        state.composerDragDepth = 0;
+        elements.composerForm.classList.remove("drag-active");
+        enqueueAttachments(Array.from(event.dataTransfer.files || []));
       });
 
       elements.messages.addEventListener("scroll", () => {
