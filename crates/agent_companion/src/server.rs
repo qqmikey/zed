@@ -16,7 +16,7 @@ use axum::{
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use paths::data_dir;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path as StdPath, PathBuf},
@@ -42,7 +42,7 @@ const MAX_TIMELINE_PAGE_SIZE: usize = 100;
 
 #[derive(Clone)]
 pub struct CompanionServerState {
-    token_id: Arc<str>,
+    authorized_tokens: Arc<HashSet<String>>,
     snapshot_rx: watch::Receiver<CompanionSnapshot>,
     event_tx: broadcast::Sender<CompanionEvent>,
     command_tx: UnboundedSender<CompanionCommand>,
@@ -123,6 +123,7 @@ pub async fn start_server(
     initial_snapshot: CompanionSnapshot,
     initial_assets: Vec<CompanionAsset>,
     token_id: String,
+    persistent_token_id: String,
     access_mode: CompanionAccessMode,
     client_html: String,
 ) -> Result<CompanionServerStart> {
@@ -151,7 +152,11 @@ pub async fn start_server(
     ));
 
     let app_state = CompanionServerState {
-        token_id: Arc::from(token_id.clone()),
+        authorized_tokens: Arc::new(
+            [token_id.clone(), persistent_token_id]
+                .into_iter()
+                .collect(),
+        ),
         snapshot_rx,
         event_tx: event_tx.clone(),
         command_tx,
@@ -361,7 +366,7 @@ async fn stream_events(mut socket: WebSocket, state: CompanionServerState) {
 }
 
 fn authorize(state: &CompanionServerState, query: &CompanionAuthQuery) -> Result<(), StatusCode> {
-    if query.token == state.token_id.as_ref() {
+    if state.authorized_tokens.contains(&query.token) {
         Ok(())
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -608,7 +613,11 @@ mod tests {
 
         (
             CompanionServerState {
-                token_id: Arc::from("test-token"),
+                authorized_tokens: Arc::new(
+                    ["test-token".to_string(), "stable-token".to_string()]
+                        .into_iter()
+                        .collect(),
+                ),
                 snapshot_rx,
                 event_tx,
                 command_tx,
@@ -635,6 +644,23 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn snapshot_route_accepts_stable_token() {
+        let (state, _) = test_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/companion/snapshot?token=stable-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

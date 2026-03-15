@@ -995,28 +995,41 @@ pub fn default_client_html() -> &'static str {
         inset 0 0 0 1px rgba(47, 111, 235, 0.28);
     }
 
-    textarea {
-      width: 100%;
-      min-height: 86px;
-      max-height: 180px;
-      resize: vertical;
+    .composer-input-shell {
+      position: relative;
+      display: block;
+      min-height: 120px;
+      padding: 13px 16px 52px;
       border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: var(--radius-lg);
-      padding: 13px 14px;
-      font: inherit;
-      color: var(--text-strong);
       background: var(--surface-strong);
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
     }
 
-    textarea:focus {
+    .composer-input-shell:focus-within {
       outline: 2px solid rgba(47, 111, 235, 0.22);
       border-color: rgba(47, 111, 235, 0.38);
     }
 
+    textarea {
+      display: block;
+      width: 100%;
+      min-height: 54px;
+      max-height: 132px;
+      resize: none;
+      border: none;
+      padding: 0;
+      font: inherit;
+      color: var(--text-strong);
+      background: transparent;
+    }
+
+    textarea:focus {
+      outline: none;
+    }
+
     textarea:disabled {
       color: var(--text-soft);
-      background: rgba(255, 255, 255, 0.04);
       cursor: not-allowed;
     }
 
@@ -1058,24 +1071,25 @@ pub fn default_client_html() -> &'static str {
       color: var(--text-soft);
     }
 
-    .composer-bar {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
     .action-button {
       appearance: none;
       border: none;
       border-radius: 999px;
-      min-width: 104px;
-      padding: 12px 18px;
+      width: 36px;
+      min-width: 36px;
+      min-height: 36px;
+      padding: 0;
       background: var(--action);
       color: var(--action-text);
       font: inherit;
       font-weight: 700;
+      font-size: 16px;
+      line-height: 1;
       cursor: pointer;
       transition: opacity 120ms ease, transform 120ms ease, background 120ms ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
 
     .action-button.stop {
@@ -1091,10 +1105,31 @@ pub fn default_client_html() -> &'static str {
       transform: translateY(1px);
     }
 
-    .composer-tools {
-      display: flex;
+    .primary-button {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      min-width: 40px;
+      min-height: 40px;
+      padding: 0 16px;
+      background: var(--action);
+      color: var(--action-text);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 120ms ease, transform 120ms ease, background 120ms ease;
+      display: inline-flex;
       align-items: center;
-      gap: 8px;
+      justify-content: center;
+    }
+
+    .primary-button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .primary-button:not(:disabled):active {
+      transform: translateY(1px);
     }
 
     .secondary-button {
@@ -1114,6 +1149,31 @@ pub fn default_client_html() -> &'static str {
     .secondary-button:disabled {
       opacity: 0.35;
       cursor: not-allowed;
+    }
+
+    .composer-attach-button,
+    .composer-submit-button {
+      position: absolute;
+      bottom: 12px;
+      z-index: 1;
+    }
+
+    .composer-attach-button {
+      left: 12px;
+      min-width: 36px;
+      min-height: 36px;
+      width: 36px;
+      padding: 0;
+      font-size: 16px;
+      line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .composer-submit-button {
+      right: 12px;
+      width: 36px;
     }
 
     .remove-attachment {
@@ -1155,8 +1215,7 @@ pub fn default_client_html() -> &'static str {
         padding-bottom: max(12px, env(safe-area-inset-bottom));
       }
 
-      .topbar-row,
-      .composer-bar {
+      .topbar-row {
         flex-direction: column;
         align-items: stretch;
       }
@@ -1175,8 +1234,13 @@ pub fn default_client_html() -> &'static str {
         grid-template-columns: minmax(0, 1fr);
       }
 
+      .primary-button,
       .action-button {
-        width: 100%;
+        width: auto;
+      }
+
+      .composer-submit-button {
+        width: 36px;
       }
     }
   </style>
@@ -1202,15 +1266,13 @@ pub fn default_client_html() -> &'static str {
 
     <form class="composer" id="composer-form">
       <div class="permission-card" id="permission-card"></div>
-      <textarea id="composer-input" placeholder="Send a follow-up to the active Zed session"></textarea>
+      <div class="composer-input-shell">
+        <textarea id="composer-input" placeholder="Send a follow-up to the active Zed session"></textarea>
+        <button class="secondary-button composer-attach-button" id="attach-button" type="button" aria-label="Attach files">&#128206;</button>
+        <button class="action-button composer-submit-button" id="action-button" type="submit" aria-label="Send message" title="Send">↑</button>
+      </div>
       <input class="file-input" id="attachment-input" type="file" multiple>
       <div class="selected-attachments" id="selected-attachments"></div>
-      <div class="composer-bar">
-        <div class="composer-tools">
-          <button class="secondary-button" id="attach-button" type="button">Attach</button>
-        </div>
-        <button class="action-button" id="action-button" type="submit">Send</button>
-      </div>
     </form>
   </main>
   <div class="modal-scrim hidden" id="reconnect-modal" role="dialog" aria-modal="true" aria-labelledby="reconnect-modal-title">
@@ -1219,7 +1281,7 @@ pub fn default_client_html() -> &'static str {
       <div class="modal-copy">Mobile Companion could not reconnect after several attempts. Try reconnecting manually.</div>
       <div class="modal-actions">
         <button class="secondary-button" id="reconnect-dismiss-button" type="button">Dismiss</button>
-        <button class="action-button" id="reconnect-retry-button" type="button">Retry</button>
+        <button class="primary-button" id="reconnect-retry-button" type="button">Retry</button>
       </div>
     </div>
   </div>
@@ -2296,8 +2358,10 @@ pub fn default_client_html() -> &'static str {
           (elements.input.value.trim().length > 0 || state.pendingAttachments.length > 0);
 
         if (hasStop) {
-          elements.actionButton.textContent = "Stop";
-          elements.actionButton.className = "action-button stop";
+          elements.actionButton.textContent = "■";
+          elements.actionButton.className = "action-button composer-submit-button stop";
+          elements.actionButton.setAttribute("aria-label", "Stop run");
+          elements.actionButton.setAttribute("title", "Stop");
           elements.actionButton.disabled = false;
           elements.input.disabled = true;
           elements.attachButton.disabled = true;
@@ -2305,8 +2369,10 @@ pub fn default_client_html() -> &'static str {
           return;
         }
 
-        elements.actionButton.textContent = state.pendingSend ? "Sending..." : "Send";
-        elements.actionButton.className = "action-button";
+        elements.actionButton.textContent = state.pendingSend ? "…" : "↑";
+        elements.actionButton.className = "action-button composer-submit-button";
+        elements.actionButton.setAttribute("aria-label", state.pendingSend ? "Sending" : "Send message");
+        elements.actionButton.setAttribute("title", state.pendingSend ? "Sending..." : "Send");
         elements.actionButton.disabled = hasPermissionRequest || !sendReady;
         elements.input.disabled = hasPermissionRequest || !commandAvailable("send_message");
         elements.attachButton.disabled =

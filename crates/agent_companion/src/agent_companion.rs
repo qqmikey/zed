@@ -4,15 +4,18 @@ mod session_mirror;
 mod static_client;
 
 use agent_settings::{AgentSettings, MobileCompanionSettings};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription, Task};
 use gpui_tokio::Tokio;
+use paths::data_dir;
 use settings::{Settings as _, SettingsStore};
 use std::{
+    fs,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
+use url::Url;
 use uuid::Uuid;
 
 pub use protocol::{
@@ -32,6 +35,7 @@ pub struct CompanionManagerStatus {
     pub selection_mode: CompanionSessionMode,
     pub shared_session: Option<CompanionSessionSummary>,
     pub access_info: Option<CompanionAccessInfo>,
+    pub persistent_access_info: Option<CompanionAccessInfo>,
     pub access_mode: CompanionAccessMode,
     pub settings: MobileCompanionSettings,
 }
@@ -100,6 +104,7 @@ impl Global for GlobalCompanionManager {}
 pub struct CompanionManager {
     mirror: Entity<CompanionSessionMirror>,
     status: CompanionManagerStatus,
+    persistent_token_id: String,
     server: Option<CompanionServerHandle>,
     follow_source: Option<CompanionSessionSource>,
     pinned_source: Option<CompanionSessionSource>,
@@ -144,6 +149,7 @@ impl CompanionManager {
     }
 
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let persistent_token_id = load_or_create_persistent_token();
         let mirror = cx.new(|_| {
             CompanionSessionMirror::new(CompanionConnectionMetadata {
                 token_id: String::new(),
@@ -157,6 +163,7 @@ impl CompanionManager {
         Self {
             mirror,
             status: CompanionManagerStatus::default(),
+            persistent_token_id,
             server: None,
             follow_source: None,
             pinned_source: None,
@@ -246,6 +253,7 @@ impl CompanionManager {
                 initial_snapshot,
                 initial_assets,
                 token_id,
+                self.persistent_token_id.clone(),
                 self.status.access_mode,
                 server::default_client_html().to_string(),
             ),
@@ -268,6 +276,10 @@ impl CompanionManager {
                     this.server = Some(handle);
                     this.status.state = CompanionServiceState::Running;
                     this.status.access_info = Some(access_info.clone());
+                    this.status.persistent_access_info = Some(CompanionAccessInfo {
+                        url: rewrite_companion_token(&access_info.url, &this.persistent_token_id)?,
+                        token_id: this.persistent_token_id.clone(),
+                    });
                     this.emit_status(cx);
                     Ok(access_info)
                 })?
@@ -277,6 +289,7 @@ impl CompanionManager {
                 this.update(cx, |this, cx| {
                     this.status.state = CompanionServiceState::Failed { message };
                     this.status.access_info = None;
+                    this.status.persistent_access_info = None;
                     this.mirror.update(cx, |mirror, cx| {
                         mirror.set_connection(
                             CompanionConnectionMetadata {
@@ -301,12 +314,14 @@ impl CompanionManager {
         let Some(server) = self.server.take() else {
             self.status.state = CompanionServiceState::Stopped;
             self.status.access_info = None;
+            self.status.persistent_access_info = None;
             self.emit_status(cx);
             return Task::ready(Ok(()));
         };
 
         self.status.state = CompanionServiceState::Stopping;
         self.status.access_info = None;
+        self.status.persistent_access_info = None;
         self.mirror.update(cx, |mirror, cx| {
             mirror.set_connection(
                 CompanionConnectionMetadata {
@@ -325,6 +340,7 @@ impl CompanionManager {
             this.update(cx, |this, cx| {
                 this.status.state = CompanionServiceState::Stopped;
                 this.status.access_info = None;
+                this.status.persistent_access_info = None;
                 this.emit_status(cx);
                 Ok(())
             })?
@@ -424,4 +440,56 @@ fn unix_time_ms() -> Option<u64> {
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|duration| duration.as_millis().try_into().ok())
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct PersistentCompanionToken {
+    token_id: String,
+}
+
+fn load_or_create_persistent_token() -> String {
+    match load_or_create_persistent_token_result() {
+        Ok(token_id) => token_id,
+        Err(error) => {
+            log::warn!("failed to load persistent mobile companion token: {error}");
+            Uuid::new_v4().to_string()
+        }
+    }
+}
+
+fn load_or_create_persistent_token_result() -> Result<String> {
+    let path = persistent_token_path();
+
+    if path.exists() {
+        let contents = fs::read_to_string(&path)?;
+        let token = serde_json::from_str::<PersistentCompanionToken>(&contents)?;
+        if !token.token_id.trim().is_empty() {
+            return Ok(token.token_id);
+        }
+    }
+
+    let token = PersistentCompanionToken {
+        token_id: Uuid::new_v4().to_string(),
+    };
+    let parent = path
+        .parent()
+        .context("persistent mobile companion token path must have a parent")?;
+    fs::create_dir_all(parent)?;
+    fs::write(&path, serde_json::to_vec_pretty(&token)?)?;
+    Ok(token.token_id)
+}
+
+fn persistent_token_path() -> PathBuf {
+    data_dir()
+        .join("mobile_companion")
+        .join("persistent_token.json")
+}
+
+fn rewrite_companion_token(url: &str, token_id: &str) -> Result<String> {
+    let mut url = Url::parse(url)?;
+    {
+        let mut query_pairs = url.query_pairs_mut();
+        query_pairs.clear().append_pair("token", token_id);
+    }
+    Ok(url.to_string())
 }

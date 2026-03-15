@@ -274,6 +274,7 @@ dependencies = [
  "hyper 0.14.32",
  "language",
  "language_model",
+ "log",
  "paths",
  "prompt_store",
  "pulldown-cmark 0.13.0",

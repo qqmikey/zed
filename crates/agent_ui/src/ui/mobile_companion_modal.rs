@@ -76,12 +76,53 @@ impl MobileCompanionModal {
         self.show_toast("Mobile companion link copied", cx);
     }
 
+    fn copy_persistent_url(
+        &mut self,
+        _: &ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(url) = self
+            .companion_manager
+            .read(cx)
+            .status()
+            .persistent_access_info
+            .as_ref()
+            .map(|info| info.url.clone())
+        else {
+            return;
+        };
+
+        cx.write_to_clipboard(ClipboardItem::new_string(url));
+        self.show_toast("Stable mobile companion link copied", cx);
+    }
+
     fn open_url(&mut self, _: &ClickEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(url) = self
             .companion_manager
             .read(cx)
             .status()
             .access_info
+            .as_ref()
+            .map(|info| info.url.clone())
+        else {
+            return;
+        };
+
+        cx.open_url(&url);
+    }
+
+    fn open_persistent_url(
+        &mut self,
+        _: &ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(url) = self
+            .companion_manager
+            .read(cx)
+            .status()
+            .persistent_access_info
             .as_ref()
             .map(|info| info.url.clone())
         else {
@@ -169,6 +210,43 @@ impl MobileCompanionModal {
                         )
                         .size(LabelSize::Small)
                         .color(Color::Muted),
+                    )
+                    .when_some(
+                        status
+                            .persistent_access_info
+                            .as_ref()
+                            .map(|info| info.url.clone()),
+                        |this, url| {
+                            this.child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(
+                                        Label::new("Stable link")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(
+                                        div()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(cx.theme().colors().border_variant)
+                                            .bg(cx.theme().colors().editor_background)
+                                            .p_3()
+                                            .child(
+                                                Label::new(url)
+                                                    .buffer_font(cx)
+                                                    .size(LabelSize::Small),
+                                            ),
+                                    )
+                                    .child(
+                                        Label::new(
+                                            "This token survives restarts. The host and port still follow the current running companion session.",
+                                        )
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                    ),
+                            )
+                        },
                     )
                     .into_any_element()
             }
@@ -336,6 +414,27 @@ impl Render for MobileCompanionModal {
                                             )
                                             .on_click(cx.listener(Self::open_url))
                                             .disabled(!is_running),
+                                    )
+                                    .child(
+                                        Button::new(
+                                            "copy-mobile-companion-stable-link",
+                                            "Copy Stable Link",
+                                        )
+                                        .on_click(cx.listener(Self::copy_persistent_url))
+                                        .disabled(!is_running),
+                                    )
+                                    .child(
+                                        Button::new(
+                                            "open-mobile-companion-stable-link",
+                                            "Open Stable Link",
+                                        )
+                                        .end_icon(
+                                            Icon::new(IconName::ArrowUpRight)
+                                                .size(IconSize::Small)
+                                                .color(Color::Muted),
+                                        )
+                                        .on_click(cx.listener(Self::open_persistent_url))
+                                        .disabled(!is_running),
                                     ),
                             )
                             .end_slot(
