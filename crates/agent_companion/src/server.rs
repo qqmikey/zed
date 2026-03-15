@@ -320,7 +320,8 @@ mod tests {
         let body = to_bytes(response.into_body()).await.expect("body");
         let html = String::from_utf8(body.to_vec()).expect("utf8");
         assert!(html.contains("Agent Companion"));
-        assert!(html.contains("Tool Timeline"));
+        assert!(html.contains("Live view of the active Zed thread."));
+        assert!(html.contains("id=\"action-button\""));
     }
 
     #[tokio::test]

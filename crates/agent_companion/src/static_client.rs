@@ -8,17 +8,22 @@ pub fn default_client_html() -> &'static str {
   <style>
     :root {
       color-scheme: light;
-      --page-bg: #f4ede1;
-      --page-accent: #d6b487;
-      --panel-bg: rgba(255, 251, 245, 0.88);
-      --panel-border: rgba(107, 78, 49, 0.14);
-      --text-strong: #1f1a17;
-      --text-muted: #65584b;
-      --text-soft: #847262;
-      --success: #2e6b4e;
-      --warning: #a56523;
-      --danger: #8f3434;
-      --shadow: 0 18px 40px rgba(74, 53, 32, 0.12);
+      --page-bg: #efe7da;
+      --shell-bg: rgba(251, 247, 240, 0.9);
+      --panel-border: rgba(75, 59, 40, 0.12);
+      --text-strong: #1f1913;
+      --text-muted: #706352;
+      --text-soft: #948676;
+      --surface: rgba(255, 255, 255, 0.76);
+      --surface-strong: rgba(255, 255, 255, 0.94);
+      --user-bubble: #d7bf9d;
+      --assistant-bubble: rgba(255, 255, 255, 0.96);
+      --success: #2f6a4b;
+      --warning: #9b6429;
+      --danger: #8f3535;
+      --action: #1f1913;
+      --action-text: #fff9f0;
+      --shadow: 0 18px 40px rgba(57, 41, 22, 0.12);
       --radius-xl: 24px;
       --radius-lg: 18px;
       --radius-md: 14px;
@@ -33,332 +38,279 @@ pub fn default_client_html() -> &'static str {
       min-height: 100%;
       margin: 0;
       background:
-        radial-gradient(circle at top left, rgba(214, 180, 135, 0.5), transparent 34%),
-        linear-gradient(180deg, #fbf5ea 0%, var(--page-bg) 58%, #efe4d4 100%);
+        radial-gradient(circle at top left, rgba(215, 191, 157, 0.52), transparent 28%),
+        linear-gradient(180deg, #f8f2e8 0%, var(--page-bg) 54%, #e9decd 100%);
       color: var(--text-strong);
       font-family: "Avenir Next", "Segoe UI", sans-serif;
     }
 
     body {
-      padding: 20px 14px 28px;
+      padding: 12px;
     }
 
-    .shell {
+    .app {
       width: min(100%, 760px);
+      min-height: calc(100svh - 24px);
       margin: 0 auto;
       display: grid;
-      gap: 14px;
-    }
-
-    .hero,
-    .panel,
-    .composer {
-      background: var(--panel-bg);
+      grid-template-rows: auto minmax(0, 1fr) auto;
       border: 1px solid var(--panel-border);
       border-radius: var(--radius-xl);
+      background: var(--shell-bg);
       box-shadow: var(--shadow);
-      backdrop-filter: blur(12px);
-    }
-
-    .hero {
-      padding: 18px;
+      backdrop-filter: blur(14px);
       overflow: hidden;
-      position: relative;
     }
 
-    .hero::after {
-      content: "";
-      position: absolute;
-      inset: auto -18% -42% auto;
-      width: 180px;
-      height: 180px;
-      border-radius: 999px;
-      background: radial-gradient(circle, rgba(214, 180, 135, 0.42), transparent 66%);
-      pointer-events: none;
+    .topbar {
+      padding: 16px 16px 14px;
+      border-bottom: 1px solid rgba(75, 59, 40, 0.08);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0));
     }
 
-    .eyebrow {
+    .topbar-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .kicker {
+      font-size: 11px;
+      line-height: 1;
       letter-spacing: 0.14em;
       text-transform: uppercase;
-      font-size: 11px;
       color: var(--text-soft);
-      margin-bottom: 10px;
-    }
-
-    .hero-top {
-      display: flex;
-      gap: 12px;
-      align-items: flex-start;
-      justify-content: space-between;
+      margin-bottom: 8px;
     }
 
     h1 {
       margin: 0;
-      font-size: clamp(28px, 4vw, 38px);
-      line-height: 0.95;
+      font-size: 24px;
+      line-height: 1.05;
       font-family: "Iowan Old Style", "Palatino Linotype", serif;
-      max-width: 12ch;
+      max-width: 16ch;
     }
 
     .subtitle {
-      margin: 10px 0 0;
+      margin: 6px 0 0;
       color: var(--text-muted);
+      font-size: 13px;
       line-height: 1.45;
-      font-size: 14px;
-      max-width: 48ch;
     }
 
-    .pill {
+    .connection {
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      padding: 8px 12px;
+      padding: 8px 11px;
       border-radius: 999px;
-      background: rgba(28, 25, 22, 0.08);
+      background: rgba(31, 25, 19, 0.08);
       color: var(--text-strong);
-      font-size: 12px;
-      font-weight: 600;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
       white-space: nowrap;
     }
 
-    .pill::before {
+    .connection::before {
       content: "";
       width: 8px;
       height: 8px;
       border-radius: 999px;
       background: currentColor;
-      opacity: 0.82;
+      opacity: 0.85;
     }
 
-    .pill.connected {
+    .connection.connected {
       color: var(--success);
-      background: rgba(46, 107, 78, 0.12);
+      background: rgba(47, 106, 75, 0.12);
     }
 
-    .pill.reconnecting,
-    .pill.connecting {
+    .connection.connecting,
+    .connection.reconnecting {
       color: var(--warning);
-      background: rgba(165, 101, 35, 0.14);
+      background: rgba(155, 100, 41, 0.12);
     }
 
-    .pill.disconnected,
-    .pill.error {
+    .connection.error,
+    .connection.disconnected {
       color: var(--danger);
-      background: rgba(143, 52, 52, 0.12);
+      background: rgba(143, 53, 53, 0.12);
     }
 
-    .run-card {
-      margin-top: 16px;
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-    }
-
-    .run-stat {
-      padding: 14px;
-      border-radius: var(--radius-lg);
-      background: rgba(255, 255, 255, 0.6);
-      border: 1px solid rgba(107, 78, 49, 0.08);
-    }
-
-    .run-label {
-      display: block;
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.12em;
-      color: var(--text-soft);
-      margin-bottom: 6px;
-    }
-
-    .run-value {
-      font-size: 17px;
-      font-weight: 700;
-    }
-
-    .stack {
-      display: grid;
-      gap: 14px;
-    }
-
-    .panel {
-      padding: 16px;
-    }
-
-    .panel-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 10px;
-      margin-bottom: 12px;
-    }
-
-    .panel-header h2 {
-      margin: 0;
-      font-size: 15px;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: var(--text-soft);
-    }
-
-    .meta {
-      font-size: 12px;
-      color: var(--text-muted);
-    }
-
-    .messages,
-    .tools {
-      display: grid;
-      gap: 10px;
-    }
-
-    .message,
-    .tool {
-      border-radius: var(--radius-lg);
-      padding: 14px;
-      border: 1px solid rgba(107, 78, 49, 0.08);
-      background: rgba(255, 255, 255, 0.72);
-    }
-
-    .message.user {
-      background: rgba(214, 180, 135, 0.26);
-    }
-
-    .message.assistant.streaming {
-      border-style: dashed;
-      background: rgba(255, 248, 238, 0.92);
-    }
-
-    .message-header,
-    .tool-header {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: flex-start;
-      margin-bottom: 8px;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      border-radius: 999px;
-      padding: 4px 8px;
-      font-size: 11px;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      background: rgba(31, 26, 23, 0.08);
-      color: var(--text-muted);
-    }
-
-    .badge.success {
-      color: var(--success);
-      background: rgba(46, 107, 78, 0.12);
-    }
-
-    .badge.warning {
-      color: var(--warning);
-      background: rgba(165, 101, 35, 0.14);
-    }
-
-    .badge.danger {
-      color: var(--danger);
-      background: rgba(143, 52, 52, 0.12);
-    }
-
-    .message-body,
-    .tool-body,
-    .tool-output {
-      line-height: 1.5;
-      font-size: 14px;
-      color: var(--text-strong);
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-
-    .tool-output {
-      margin-top: 10px;
+    .activity {
+      margin-top: 12px;
       padding: 10px 12px;
-      border-radius: 12px;
-      background: #201914;
-      color: #f5ecdf;
-      font-family: "JetBrains Mono", "SF Mono", monospace;
-      font-size: 12px;
-      overflow-x: auto;
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.55);
+      border: 1px solid rgba(75, 59, 40, 0.08);
+      color: var(--text-muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .messages-shell {
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .messages {
+      height: 100%;
+      overflow-y: auto;
+      padding: 14px 12px 6px;
+      display: grid;
+      gap: 10px;
+      align-content: start;
     }
 
     .empty {
-      padding: 18px 14px;
+      margin: auto;
+      padding: 18px 16px;
       border-radius: var(--radius-lg);
-      border: 1px dashed rgba(107, 78, 49, 0.22);
+      border: 1px dashed rgba(75, 59, 40, 0.18);
+      background: rgba(255, 255, 255, 0.42);
       color: var(--text-muted);
       text-align: center;
-      background: rgba(255, 255, 255, 0.42);
+      max-width: 28ch;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .message-row {
+      display: flex;
+      width: 100%;
+    }
+
+    .message-row.user {
+      justify-content: flex-end;
+    }
+
+    .message-row.assistant,
+    .message-row.streaming {
+      justify-content: flex-start;
+    }
+
+    .message-row.system,
+    .message-row.tool {
+      justify-content: center;
+    }
+
+    .message {
+      max-width: min(92%, 560px);
+      padding: 12px 14px;
+      border-radius: 20px;
+      border: 1px solid rgba(75, 59, 40, 0.08);
+      background: var(--assistant-bubble);
+      box-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+    }
+
+    .message-row.user .message {
+      background: var(--user-bubble);
+      border-bottom-right-radius: 8px;
+    }
+
+    .message-row.assistant .message,
+    .message-row.streaming .message {
+      border-bottom-left-radius: 8px;
+    }
+
+    .message-row.system .message,
+    .message-row.tool .message {
+      background: rgba(31, 25, 19, 0.06);
+      color: var(--text-muted);
+    }
+
+    .message-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 6px;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-soft);
+    }
+
+    .message-body {
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    .streaming-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .streaming-indicator::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: currentColor;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% {
+        opacity: 0.35;
+        transform: scale(0.9);
+      }
+      50% {
+        opacity: 1;
+        transform: scale(1);
+      }
     }
 
     .composer {
-      padding: 14px;
+      padding: 10px 12px 12px;
+      border-top: 1px solid rgba(75, 59, 40, 0.08);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.3));
       display: grid;
-      gap: 12px;
-      position: sticky;
-      bottom: 10px;
+      gap: 10px;
     }
 
     textarea {
       width: 100%;
-      min-height: 108px;
+      min-height: 86px;
+      max-height: 180px;
       resize: vertical;
-      border: 1px solid rgba(107, 78, 49, 0.18);
+      border: 1px solid rgba(75, 59, 40, 0.12);
       border-radius: var(--radius-lg);
-      padding: 14px;
+      padding: 13px 14px;
       font: inherit;
       color: var(--text-strong);
-      background: rgba(255, 255, 255, 0.92);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+      background: var(--surface-strong);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
     }
 
     textarea:focus {
-      outline: 2px solid rgba(165, 101, 35, 0.24);
-      border-color: rgba(165, 101, 35, 0.28);
+      outline: 2px solid rgba(31, 25, 19, 0.12);
+      border-color: rgba(31, 25, 19, 0.18);
     }
 
-    .composer-actions {
-      display: flex;
-      gap: 10px;
-    }
-
-    button {
-      appearance: none;
-      border: none;
-      border-radius: 999px;
-      padding: 12px 16px;
-      font: inherit;
-      font-weight: 700;
-      cursor: pointer;
-      transition: transform 120ms ease, opacity 120ms ease, background 120ms ease;
-    }
-
-    button:disabled {
-      opacity: 0.42;
+    textarea:disabled {
+      color: var(--text-soft);
+      background: rgba(255, 255, 255, 0.6);
       cursor: not-allowed;
     }
 
-    button:not(:disabled):active {
-      transform: translateY(1px);
-    }
-
-    .primary {
-      background: linear-gradient(135deg, #a65d2c, #c7834e);
-      color: #fff8ef;
-    }
-
-    .secondary {
-      background: rgba(31, 26, 23, 0.08);
-      color: var(--text-strong);
+    .composer-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
     }
 
     .feedback {
+      flex: 1;
       min-height: 18px;
-      font-size: 13px;
+      font-size: 12px;
       color: var(--text-muted);
+      line-height: 1.4;
     }
 
     .feedback.success {
@@ -369,80 +321,92 @@ pub fn default_client_html() -> &'static str {
       color: var(--danger);
     }
 
+    .action-button {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      min-width: 104px;
+      padding: 12px 18px;
+      background: var(--action);
+      color: var(--action-text);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 120ms ease, transform 120ms ease, background 120ms ease;
+    }
+
+    .action-button.stop {
+      background: linear-gradient(135deg, #8f3535, #b45c4e);
+    }
+
+    .action-button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .action-button:not(:disabled):active {
+      transform: translateY(1px);
+    }
+
     @media (max-width: 560px) {
       body {
-        padding: 12px 10px 18px;
+        padding: 0;
       }
 
-      .hero,
-      .panel,
+      .app {
+        width: 100%;
+        min-height: 100svh;
+        border-radius: 0;
+        border-left: none;
+        border-right: none;
+      }
+
+      .topbar {
+        padding-top: max(16px, env(safe-area-inset-top));
+      }
+
       .composer {
-        border-radius: 18px;
+        padding-bottom: max(12px, env(safe-area-inset-bottom));
       }
 
-      .hero-top {
+      .topbar-row,
+      .composer-bar {
         flex-direction: column;
         align-items: stretch;
       }
 
-      .run-card {
-        grid-template-columns: 1fr;
-      }
-
-      .composer-actions {
-        flex-direction: column;
+      .action-button {
+        width: 100%;
       }
     }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <section class="hero">
-      <div class="eyebrow">Agent Companion</div>
-      <div class="hero-top">
+  <main class="app">
+    <header class="topbar">
+      <div class="topbar-row">
         <div>
+          <div class="kicker">Agent Companion</div>
           <h1 id="session-title">Waiting for a session</h1>
-          <p class="subtitle" id="session-subtitle">Open a thread in Zed to stream progress, messages, and tool activity here.</p>
+          <p class="subtitle" id="session-subtitle">Open a thread in Zed to mirror the conversation here.</p>
         </div>
-        <div class="pill connecting" id="connection-pill">Connecting</div>
+        <div class="connection connecting" id="connection-pill">Connecting</div>
       </div>
-      <div class="run-card">
-        <div class="run-stat">
-          <span class="run-label">Run status</span>
-          <div class="run-value" id="run-status">Idle</div>
-        </div>
-        <div class="run-stat">
-          <span class="run-label">Available commands</span>
-          <div class="run-value" id="command-summary">0</div>
-        </div>
-      </div>
-    </section>
+      <div class="activity" id="activity-line">Idle</div>
+    </header>
 
-    <section class="panel">
-      <div class="panel-header">
-        <h2>Conversation</h2>
-        <div class="meta" id="message-count">0 messages</div>
-      </div>
+    <section class="messages-shell">
       <div class="messages" id="messages"></div>
     </section>
 
-    <section class="panel">
-      <div class="panel-header">
-        <h2>Tool Timeline</h2>
-        <div class="meta" id="tool-count">0 steps</div>
-      </div>
-      <div class="tools" id="tools"></div>
-    </section>
-
-    <section class="composer">
+    <form class="composer" id="composer-form">
       <textarea id="composer-input" placeholder="Send a follow-up to the active Zed session"></textarea>
-      <div class="composer-actions">
-        <button class="primary" id="send-button">Send</button>
-        <button class="secondary" id="stop-button">Stop</button>
+      <div class="composer-bar">
+        <div class="feedback" id="feedback"></div>
+        <button class="action-button" id="action-button" type="submit">Send</button>
       </div>
-      <div class="feedback" id="feedback"></div>
-    </section>
-  </div>
+    </form>
+  </main>
 
   <script>
     (() => {
@@ -459,22 +423,19 @@ pub fn default_client_html() -> &'static str {
         feedback: "",
         feedbackKind: "info",
         pendingSend: false,
-        socket: null
+        socket: null,
+        forceScrollToBottom: true
       };
 
       const elements = {
         sessionTitle: document.getElementById("session-title"),
         sessionSubtitle: document.getElementById("session-subtitle"),
         connectionPill: document.getElementById("connection-pill"),
-        runStatus: document.getElementById("run-status"),
-        commandSummary: document.getElementById("command-summary"),
-        messageCount: document.getElementById("message-count"),
+        activityLine: document.getElementById("activity-line"),
         messages: document.getElementById("messages"),
-        toolCount: document.getElementById("tool-count"),
-        tools: document.getElementById("tools"),
+        composerForm: document.getElementById("composer-form"),
         input: document.getElementById("composer-input"),
-        sendButton: document.getElementById("send-button"),
-        stopButton: document.getElementById("stop-button"),
+        actionButton: document.getElementById("action-button"),
         feedback: document.getElementById("feedback")
       };
 
@@ -510,21 +471,42 @@ pub fn default_client_html() -> &'static str {
           .join(" ");
       }
 
-      function badgeClass(status) {
-        if (["completed", "succeeded", "done", "connected"].includes(status)) {
-          return "success";
-        }
-        if (["failed", "error", "canceled", "stopped", "disconnected"].includes(status)) {
-          return "danger";
-        }
-        if (["running", "running_tools", "thinking", "waiting_for_input", "reconnecting", "connecting", "pending"].includes(status)) {
-          return "warning";
-        }
-        return "";
-      }
-
       function commandAvailable(kind) {
         return state.snapshot.available_commands.includes(kind);
+      }
+
+      function activeToolSummary() {
+        const runningTool = (state.snapshot.tool_calls || []).find(tool =>
+          tool.status === "running" || tool.status === "pending"
+        );
+
+        if (!runningTool) {
+          return null;
+        }
+
+        return runningTool.summary || runningTool.title || null;
+      }
+
+      function activityText() {
+        const toolSummary = activeToolSummary();
+
+        switch (state.snapshot.run_status) {
+          case "running_tools":
+            return toolSummary ? `Running: ${toolSummary}` : "Running tools";
+          case "thinking":
+            return "Thinking";
+          case "waiting_for_input":
+            return "Waiting for input";
+          case "failed":
+            return "Run failed";
+          case "stopped":
+            return "Run stopped";
+          case "completed":
+            return "Ready";
+          case "idle":
+          default:
+            return "Idle";
+        }
       }
 
       function setFeedback(message, kind = "info") {
@@ -538,8 +520,21 @@ pub fn default_client_html() -> &'static str {
         elements.feedback.className = `feedback ${state.feedbackKind}`;
       }
 
+      function shouldAutoScroll() {
+        const threshold = 64;
+        const distanceFromBottom =
+          elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight;
+        return state.forceScrollToBottom || distanceFromBottom <= threshold;
+      }
+
+      function scrollMessagesToBottom() {
+        elements.messages.scrollTop = elements.messages.scrollHeight;
+      }
+
       function renderMessages() {
+        const shouldStick = shouldAutoScroll();
         const entries = state.snapshot.messages.slice();
+
         if (state.snapshot.streaming_text) {
           entries.push({
             id: "streaming-preview",
@@ -550,79 +545,75 @@ pub fn default_client_html() -> &'static str {
           });
         }
 
-        elements.messageCount.textContent = `${entries.length} message${entries.length === 1 ? "" : "s"}`;
-
         if (!entries.length) {
-          elements.messages.innerHTML = '<div class="empty">No messages yet.</div>';
+          elements.messages.innerHTML = '<div class="empty">The current thread has no messages yet.</div>';
+          if (shouldStick) {
+            scrollMessagesToBottom();
+          }
           return;
         }
 
         elements.messages.innerHTML = entries.map(message => {
-          const role = escapeHtml(titleCase(message.role));
-          const status = escapeHtml(titleCase(message.status));
-          const statusClass = badgeClass(message.status);
-          const streamingClass = message.streaming ? " streaming" : "";
+          const roleLabel = message.role === "user" ? "You" : titleCase(message.role);
+          const statusLabel = message.streaming
+            ? '<span class="streaming-indicator">Streaming</span>'
+            : escapeHtml(titleCase(message.status));
 
           return `
-            <article class="message ${escapeHtml(message.role)}${streamingClass}">
-              <div class="message-header">
-                <span class="badge">${role}</span>
-                <span class="badge ${statusClass}">${status}</span>
-              </div>
-              <div class="message-body">${escapeHtml(message.text)}</div>
-            </article>
+            <div class="message-row ${escapeHtml(message.streaming ? "streaming" : message.role)}">
+              <article class="message">
+                <div class="message-meta">
+                  <span>${escapeHtml(roleLabel)}</span>
+                  <span>${statusLabel}</span>
+                </div>
+                <div class="message-body">${escapeHtml(message.text)}</div>
+              </article>
+            </div>
           `;
         }).join("");
+
+        if (shouldStick) {
+          scrollMessagesToBottom();
+        }
+        state.forceScrollToBottom = false;
       }
 
-      function renderTools() {
-        const toolCalls = state.snapshot.tool_calls || [];
-        elements.toolCount.textContent = `${toolCalls.length} step${toolCalls.length === 1 ? "" : "s"}`;
+      function renderActionButton() {
+        const hasStop = commandAvailable("stop_run");
+        const canSend = commandAvailable("send_message") && !state.pendingSend;
+        const sendReady = canSend && elements.input.value.trim().length > 0;
 
-        if (!toolCalls.length) {
-          elements.tools.innerHTML = '<div class="empty">No tool activity for this run yet.</div>';
+        if (hasStop) {
+          elements.actionButton.textContent = "Stop";
+          elements.actionButton.className = "action-button stop";
+          elements.actionButton.disabled = false;
+          elements.input.disabled = true;
+          elements.input.placeholder = "Wait for the current run to finish or stop it.";
           return;
         }
 
-        elements.tools.innerHTML = toolCalls.map(tool => {
-          const summary = tool.summary ? `<div class="tool-body">${escapeHtml(tool.summary)}</div>` : "";
-          const output = tool.output_preview
-            ? `<div class="tool-output">${escapeHtml(tool.output_preview)}</div>`
-            : "";
-
-          return `
-            <article class="tool">
-              <div class="tool-header">
-                <strong>${escapeHtml(tool.title)}</strong>
-                <span class="badge ${badgeClass(tool.status)}">${escapeHtml(titleCase(tool.status))}</span>
-              </div>
-              ${summary}
-              ${output}
-            </article>
-          `;
-        }).join("");
+        elements.actionButton.textContent = state.pendingSend ? "Sending..." : "Send";
+        elements.actionButton.className = "action-button";
+        elements.actionButton.disabled = !sendReady;
+        elements.input.disabled = !commandAvailable("send_message");
+        elements.input.placeholder = commandAvailable("send_message")
+          ? "Send a follow-up to the active Zed session"
+          : "This session is not ready for input";
       }
 
       function render() {
         const session = state.snapshot.session;
+
         elements.sessionTitle.textContent = session ? session.title : "Waiting for a session";
         elements.sessionSubtitle.textContent = session
-          ? `Mirroring ${session.id} from the active Zed thread.`
-          : "Open a thread in Zed to stream progress, messages, and tool activity here.";
-
+          ? "Live view of the active Zed thread."
+          : "Open a thread in Zed to mirror the conversation here.";
         elements.connectionPill.textContent = titleCase(state.connectionState);
-        elements.connectionPill.className = `pill ${state.connectionState}`;
-        elements.runStatus.textContent = titleCase(state.snapshot.run_status || "idle");
-        elements.commandSummary.textContent = `${state.snapshot.available_commands.length}`;
-
-        const canSend = commandAvailable("send_message") && !state.pendingSend;
-        const canStop = commandAvailable("stop_run");
-        elements.sendButton.disabled = !canSend;
-        elements.stopButton.disabled = !canStop;
-        elements.input.disabled = !commandAvailable("send_message");
+        elements.connectionPill.className = `connection ${state.connectionState}`;
+        elements.activityLine.textContent = activityText();
 
         renderMessages();
-        renderTools();
+        renderActionButton();
         renderFeedback();
       }
 
@@ -669,6 +660,7 @@ pub fn default_client_html() -> &'static str {
             break;
         }
 
+        state.forceScrollToBottom = true;
         render();
       }
 
@@ -747,6 +739,7 @@ pub fn default_client_html() -> &'static str {
         try {
           await postCommand({ type: "send_message", text });
           elements.input.value = "";
+          state.forceScrollToBottom = true;
           setFeedback("Message sent to the active Zed session.", "success");
         } catch (error) {
           setFeedback(`Failed to send message: ${error}`, "error");
@@ -769,18 +762,28 @@ pub fn default_client_html() -> &'static str {
         }
       }
 
-      elements.sendButton.addEventListener("click", () => {
-        sendMessage();
+      async function handlePrimaryAction() {
+        if (commandAvailable("stop_run")) {
+          await stopRun();
+          return;
+        }
+
+        await sendMessage();
+      }
+
+      elements.composerForm.addEventListener("submit", event => {
+        event.preventDefault();
+        handlePrimaryAction();
       });
 
-      elements.stopButton.addEventListener("click", () => {
-        stopRun();
+      elements.input.addEventListener("input", () => {
+        renderActionButton();
       });
 
       elements.input.addEventListener("keydown", event => {
-        if (event.key === "Enter" && !event.shiftKey && !event.metaKey) {
+        if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !commandAvailable("stop_run")) {
           event.preventDefault();
-          sendMessage();
+          handlePrimaryAction();
         }
       });
 

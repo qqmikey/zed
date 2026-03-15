@@ -15,14 +15,17 @@ pub struct MobileCompanionModal {
 
 impl MobileCompanionModal {
     pub fn show(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) {
-        workspace.update(cx, |workspace, cx| {
-            if let Some(existing) = workspace.active_modal::<Self>(cx) {
-                window.focus(&existing.focus_handle(cx), cx);
-                return;
-            }
+        let workspace = workspace.clone();
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                if let Some(existing) = workspace.active_modal::<Self>(cx) {
+                    window.focus(&existing.focus_handle(cx), cx);
+                    return;
+                }
 
-            let workspace_entity = cx.entity().clone();
-            workspace.toggle_modal(window, cx, |_window, cx| Self::new(workspace_entity, cx));
+                let workspace_entity = cx.entity().clone();
+                workspace.toggle_modal(window, cx, |_window, cx| Self::new(workspace_entity, cx));
+            });
         });
     }
 
