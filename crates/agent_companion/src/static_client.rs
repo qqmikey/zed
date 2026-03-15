@@ -77,13 +77,9 @@ pub fn default_client_html() -> &'static str {
       gap: 12px;
     }
 
-    .kicker {
-      font-size: 11px;
-      line-height: 1;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--text-soft);
-      margin-bottom: 8px;
+    .topbar-status {
+      position: relative;
+      flex-shrink: 0;
     }
 
     h1 {
@@ -94,14 +90,9 @@ pub fn default_client_html() -> &'static str {
       max-width: 16ch;
     }
 
-    .subtitle {
-      margin: 6px 0 0;
-      color: var(--text-muted);
-      font-size: 13px;
-      line-height: 1.45;
-    }
-
     .connection {
+      appearance: none;
+      border: none;
       display: inline-flex;
       align-items: center;
       gap: 8px;
@@ -114,6 +105,7 @@ pub fn default_client_html() -> &'static str {
       letter-spacing: 0.08em;
       text-transform: uppercase;
       white-space: nowrap;
+      cursor: pointer;
     }
 
     .connection::before {
@@ -142,6 +134,50 @@ pub fn default_client_html() -> &'static str {
       background: rgba(214, 107, 107, 0.12);
     }
 
+    .connection-log {
+      position: absolute;
+      top: calc(100% + 8px);
+      right: 0;
+      width: min(320px, calc(100vw - 32px));
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(26, 28, 35, 0.98);
+      box-shadow: 0 18px 38px rgba(0, 0, 0, 0.34);
+      z-index: 8;
+    }
+
+    .connection-log.hidden {
+      display: none;
+    }
+
+    .connection-log-empty {
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--text-soft);
+    }
+
+    .connection-log-item {
+      display: grid;
+      gap: 4px;
+      padding: 8px 10px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .connection-log-item.success {
+      color: var(--success);
+    }
+
+    .connection-log-item.error {
+      color: var(--danger);
+    }
+
     .activity {
       margin-top: 12px;
       padding: 10px 12px;
@@ -153,9 +189,14 @@ pub fn default_client_html() -> &'static str {
       line-height: 1.4;
     }
 
+    .activity.hidden {
+      display: none;
+    }
+
     .messages-shell {
       min-height: 0;
       overflow: hidden;
+      min-width: 0;
     }
 
     .permission-card {
@@ -278,10 +319,12 @@ pub fn default_client_html() -> &'static str {
     .messages {
       height: 100%;
       overflow-y: auto;
+      overflow-x: hidden;
       padding: 14px 12px 12px;
       display: grid;
       gap: 10px;
       align-content: start;
+      min-width: 0;
     }
 
     .empty {
@@ -300,6 +343,8 @@ pub fn default_client_html() -> &'static str {
     .message-row {
       display: flex;
       width: 100%;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .message-row.user {
@@ -318,11 +363,12 @@ pub fn default_client_html() -> &'static str {
 
     .message {
       max-width: min(92%, 560px);
-      padding: 12px 14px;
-      border-radius: 20px;
+      min-width: 0;
+      padding: 10px 12px;
+      border-radius: 18px;
       border: 1px solid rgba(255, 255, 255, 0.06);
       background: var(--assistant-bubble);
-      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.14);
+      box-shadow: 0 8px 18px rgba(0, 0, 0, 0.12);
     }
 
     .message-row.user .message {
@@ -341,15 +387,207 @@ pub fn default_client_html() -> &'static str {
       color: var(--text-muted);
     }
 
-    .message-meta {
+    .tool-row {
+      display: flex;
+      width: 100%;
+      justify-content: stretch;
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    .tool-card {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      border-radius: 12px;
+      border: none;
+      background: transparent;
+      box-shadow: none;
+      overflow: visible;
+    }
+
+    .tool-card-summary {
+      width: 100%;
+      padding: 8px 6px 8px 2px;
+      border: none;
+      background: transparent;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+      display: grid;
+      gap: 4px;
+      border-radius: 12px;
+    }
+
+    .tool-card-summary:hover {
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .tool-card-head {
       display: flex;
       justify-content: space-between;
       gap: 10px;
-      margin-bottom: 6px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .tool-card-main {
+      min-width: 0;
+      flex: 1;
+      display: flex;
+      flex-wrap: nowrap;
+      align-items: center;
+      gap: 6px;
+      overflow: hidden;
+    }
+
+    .tool-card-primary {
       font-size: 11px;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--text-soft);
+      flex-shrink: 0;
+    }
+
+    .tool-card-inline-separator {
+      color: var(--text-soft);
+      flex-shrink: 0;
+    }
+
+    .tool-card-command {
+      font-size: 13px;
+      line-height: 1.35;
+      color: var(--text-muted);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .tool-card-toggle {
+      flex-shrink: 0;
+      font-size: 12px;
+      color: var(--text-soft);
+      font-weight: 500;
+      opacity: 0.9;
+    }
+
+    .tool-card-details {
+      display: grid;
+      gap: 10px;
+      padding: 4px 0 12px 0;
+      min-width: 0;
+    }
+
+    .tool-detail {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(0, 0, 0, 0.18);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      min-width: 0;
+    }
+
+    .tool-detail-empty,
+    .tool-terminal-empty {
+      font-size: 13px;
+      line-height: 1.45;
+      color: var(--text-soft);
+    }
+
+    .tool-detail-body {
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    .tool-detail-body.plain {
+      white-space: pre-wrap;
+    }
+
+    .tool-detail-body.markdown > :first-child {
+      margin-top: 0;
+    }
+
+    .tool-detail-body.markdown > :last-child {
+      margin-bottom: 0;
+    }
+
+    .tool-detail-body.markdown a {
+      color: rgba(123, 171, 255, 0.96);
+      text-decoration: underline;
+      text-underline-offset: 0.16em;
+    }
+
+    .tool-detail-body.markdown code {
+      padding: 0.12em 0.36em;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 0.92em;
+      font-family: "SFMono-Regular", "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+    }
+
+    .tool-detail-body.markdown pre,
+    .tool-terminal-output,
+    .tool-edit-code {
+      overflow-x: auto;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(0, 0, 0, 0.28);
+      color: var(--text-strong);
+      font-size: 12px;
+      line-height: 1.45;
+      font-family: "SFMono-Regular", "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 0;
+    }
+
+    .tool-detail-body.markdown pre code {
+      display: block;
+      padding: 0;
+      background: transparent;
+      border-radius: 0;
+      white-space: pre;
+      overflow-wrap: normal;
+    }
+
+    .tool-terminal-header,
+    .tool-edit-header {
+      display: grid;
+      gap: 4px;
+    }
+
+    .tool-terminal-command,
+    .tool-edit-path {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-strong);
+      word-break: break-word;
+    }
+
+    .tool-terminal-meta,
+    .tool-edit-kicker {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-soft);
+    }
+
+    .tool-edit-columns {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      min-width: 0;
+    }
+
+    .tool-edit-pane {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
     }
 
     .message-body {
@@ -613,22 +851,6 @@ pub fn default_client_html() -> &'static str {
       gap: 10px;
     }
 
-    .feedback {
-      flex: 1;
-      min-height: 18px;
-      font-size: 12px;
-      color: var(--text-muted);
-      line-height: 1.4;
-    }
-
-    .feedback.success {
-      color: var(--success);
-    }
-
-    .feedback.error {
-      color: var(--danger);
-    }
-
     .action-button {
       appearance: none;
       border: none;
@@ -726,6 +948,20 @@ pub fn default_client_html() -> &'static str {
         align-items: stretch;
       }
 
+      .topbar-status {
+        width: 100%;
+      }
+
+      .connection-log {
+        left: 0;
+        right: auto;
+        width: 100%;
+      }
+
+      .tool-edit-columns {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
       .action-button {
         width: 100%;
       }
@@ -737,13 +973,14 @@ pub fn default_client_html() -> &'static str {
     <header class="topbar">
       <div class="topbar-row">
         <div>
-          <div class="kicker">Agent Companion</div>
           <h1 id="session-title">Waiting for a session</h1>
-          <p class="subtitle" id="session-subtitle">Open a thread in Zed to mirror the conversation here.</p>
         </div>
-        <div class="connection connecting" id="connection-pill">Connecting</div>
+        <div class="topbar-status">
+          <button class="connection connecting" id="connection-pill" type="button">Connecting</button>
+          <div class="connection-log hidden" id="connection-log"></div>
+        </div>
       </div>
-      <div class="activity" id="activity-line">Idle</div>
+      <div class="activity hidden" id="activity-line"></div>
     </header>
 
     <section class="messages-shell">
@@ -759,7 +996,6 @@ pub fn default_client_html() -> &'static str {
         <div class="composer-tools">
           <button class="secondary-button" id="attach-button" type="button">Attach</button>
         </div>
-        <div class="feedback" id="feedback"></div>
         <button class="action-button" id="action-button" type="submit">Send</button>
       </div>
     </form>
@@ -773,30 +1009,30 @@ pub fn default_client_html() -> &'static str {
           connection: {
             access_mode: "control"
           },
-          messages: [],
-          has_more_messages_before: false,
+          timeline: [],
+          has_more_timeline_before: false,
           streaming_text: null,
           tool_calls: [],
           run_status: "idle",
           available_commands: []
         },
         connectionState: "connecting",
-        feedback: "",
-        feedbackKind: "info",
+        eventLog: [],
+        eventLogOpen: false,
         pendingSend: false,
         pendingAuthorization: false,
         pendingAuthorizationOptionId: null,
         pendingAuthorizationToolCallId: null,
         pendingAttachments: [],
-        loadingOlderMessages: false,
+        loadingOlderTimeline: false,
         selectedPermissionChoiceIndices: {},
+        expandedToolCalls: {},
         socket: null,
         forceScrollToBottom: true
       };
 
       const elements = {
         sessionTitle: document.getElementById("session-title"),
-        sessionSubtitle: document.getElementById("session-subtitle"),
         connectionPill: document.getElementById("connection-pill"),
         activityLine: document.getElementById("activity-line"),
         permissionCard: document.getElementById("permission-card"),
@@ -807,7 +1043,7 @@ pub fn default_client_html() -> &'static str {
         selectedAttachments: document.getElementById("selected-attachments"),
         attachButton: document.getElementById("attach-button"),
         actionButton: document.getElementById("action-button"),
-        feedback: document.getElementById("feedback")
+        connectionLog: document.getElementById("connection-log")
       };
 
       const maxAttachmentBytes = 10 * 1024 * 1024;
@@ -842,10 +1078,10 @@ pub fn default_client_html() -> &'static str {
         return apiPath(`/companion/assets/${encodeURIComponent(assetId)}`);
       }
 
-      function messagesPageUrl(beforeMessageId) {
-        const url = new URL(apiPath("/companion/messages"), window.location.origin);
-        if (beforeMessageId) {
-          url.searchParams.set("before_message_id", beforeMessageId);
+      function timelinePageUrl(beforeEntryId) {
+        const url = new URL(apiPath("/companion/timeline"), window.location.origin);
+        if (beforeEntryId) {
+          url.searchParams.set("before_entry_id", beforeEntryId);
         }
         return url.pathname + url.search;
       }
@@ -942,30 +1178,37 @@ pub fn default_client_html() -> &'static str {
         }
       }
 
-      function mergeLatestMessages(incomingMessages) {
-        const currentMessages = state.snapshot.messages || [];
-        if (!currentMessages.length) {
-          return incomingMessages;
+      function timelineEntryId(entry) {
+        return entry && typeof entry.id === "string" ? entry.id : "";
+      }
+
+      function mergeLatestTimeline(incomingTimeline) {
+        const currentTimeline = state.snapshot.timeline || [];
+        if (!currentTimeline.length) {
+          return incomingTimeline;
         }
 
-        const incomingIds = new Set(incomingMessages.map(message => message.id));
-        const firstOverlapIndex = currentMessages.findIndex(message => incomingIds.has(message.id));
+        const incomingIds = new Set(incomingTimeline.map(timelineEntryId));
+        const firstOverlapIndex = currentTimeline.findIndex(entry =>
+          incomingIds.has(timelineEntryId(entry))
+        );
 
         if (firstOverlapIndex >= 0) {
-          const preservedOlder = currentMessages
+          const preservedOlder = currentTimeline
             .slice(0, firstOverlapIndex)
-            .filter(message => !incomingIds.has(message.id));
-          return preservedOlder.concat(incomingMessages);
+            .filter(entry => !incomingIds.has(timelineEntryId(entry)));
+          return preservedOlder.concat(incomingTimeline);
         }
 
         const merged = [];
         const seen = new Set();
-        for (const message of currentMessages.concat(incomingMessages)) {
-          if (seen.has(message.id)) {
+        for (const entry of currentTimeline.concat(incomingTimeline)) {
+          const entryId = timelineEntryId(entry);
+          if (seen.has(entryId)) {
             continue;
           }
-          seen.add(message.id);
-          merged.push(message);
+          seen.add(entryId);
+          merged.push(entry);
         }
         return merged;
       }
@@ -979,11 +1222,15 @@ pub fn default_client_html() -> &'static str {
           nextSessionId &&
           currentSessionId === nextSessionId;
 
+        if (currentSessionId !== nextSessionId) {
+          state.expandedToolCalls = {};
+        }
+
         state.snapshot = {
           ...snapshot,
-          messages: shouldMergeMessages
-            ? mergeLatestMessages(snapshot.messages || [])
-            : (snapshot.messages || [])
+          timeline: shouldMergeMessages
+            ? mergeLatestTimeline(snapshot.timeline || [])
+            : (snapshot.timeline || [])
         };
       }
 
@@ -1028,15 +1275,45 @@ pub fn default_client_html() -> &'static str {
         }
       }
 
-      function setFeedback(message, kind = "info") {
-        state.feedback = message;
-        state.feedbackKind = kind;
-        renderFeedback();
+      function showActivityLine() {
+        if (!state.snapshot.session) {
+          return false;
+        }
+
+        if (activePermissionToolCall() || activeToolSummary()) {
+          return true;
+        }
+
+        return [
+          "thinking",
+          "running_tools",
+          "waiting_for_input",
+          "failed",
+          "stopped"
+        ].includes(state.snapshot.run_status);
       }
 
-      function renderFeedback() {
-        elements.feedback.textContent = state.feedback;
-        elements.feedback.className = `feedback ${state.feedbackKind}`;
+      function pushEvent(message, kind = "info") {
+        if (!message) {
+          return;
+        }
+
+        state.eventLog = [{ message, kind }].concat(state.eventLog).slice(0, 16);
+        renderConnectionLog();
+      }
+
+      function renderConnectionLog() {
+        if (!state.eventLog.length) {
+          elements.connectionLog.innerHTML = '<div class="connection-log-empty">No recent events.</div>';
+        } else {
+          elements.connectionLog.innerHTML = state.eventLog.map(event => `
+            <div class="connection-log-item ${event.kind}">${escapeHtml(event.message)}</div>
+          `).join("");
+        }
+
+        elements.connectionLog.className = state.eventLogOpen
+          ? "connection-log"
+          : "connection-log hidden";
       }
 
       function selectedAttachmentSummary(file) {
@@ -1163,7 +1440,7 @@ pub fn default_client_html() -> &'static str {
       function lastPendingAssistantIndex(entries) {
         for (let index = entries.length - 1; index >= 0; index -= 1) {
           const entry = entries[index];
-          if (entry.role === "assistant" && entry.status === "pending") {
+          if (entry.type === "message" && entry.role === "assistant" && entry.status === "pending") {
             return index;
           }
         }
@@ -1230,9 +1507,140 @@ pub fn default_client_html() -> &'static str {
         return "";
       }
 
-      function renderMessages() {
+      function toolCallKindLabel(toolCall) {
+        const detailTypes = new Set((toolCall.details || []).map(detail => detail.type));
+        if (detailTypes.has("edit")) {
+          return "Edit";
+        }
+        if (detailTypes.has("terminal")) {
+          return "Command";
+        }
+        return "Tool";
+      }
+
+      function toolCallPrimaryLabel(toolCall) {
+        if (toolCall.title) {
+          return toolCall.title;
+        }
+
+        if (toolCall.summary) {
+          return toolCall.summary;
+        }
+
+        return toolCallKindLabel(toolCall);
+      }
+
+      function toolCallInlineLabel(toolCall) {
+        if (toolCall.inline_label) {
+          return toolCall.inline_label;
+        }
+
+        const terminalDetail = (toolCall.details || []).find(detail => detail.type === "terminal");
+        if (terminalDetail && terminalDetail.command) {
+          return terminalDetail.command;
+        }
+
+        const editDetail = (toolCall.details || []).find(detail => detail.type === "edit");
+        if (editDetail && editDetail.path) {
+          return editDetail.path;
+        }
+
+        return toolCall.output_preview || toolCall.summary || "";
+      }
+
+      function renderToolMarkdownDetail(detail) {
+        const body = detail.rendered_html
+          ? `<div class="tool-detail-body markdown">${detail.rendered_html}</div>`
+          : (detail.text
+            ? `<div class="tool-detail-body plain">${escapeHtml(detail.text)}</div>`
+            : "");
+        return `
+          <section class="tool-detail tool-detail-markdown">
+            ${body}
+            ${renderAttachments(detail.attachments || [])}
+          </section>
+        `;
+      }
+
+      function renderToolTerminalDetail(detail) {
+        return `
+          <section class="tool-detail tool-detail-terminal">
+            <div class="tool-terminal-header">
+              <div class="tool-terminal-command">${escapeHtml(detail.command)}</div>
+              ${detail.working_directory ? `<div class="tool-terminal-meta">${escapeHtml(detail.working_directory)}</div>` : ""}
+            </div>
+            ${detail.output ? `<pre class="tool-terminal-output">${escapeHtml(detail.output)}</pre>` : '<div class="tool-terminal-empty">No output yet.</div>'}
+            ${detail.truncated ? '<div class="tool-terminal-meta">Output truncated.</div>' : ""}
+          </section>
+        `;
+      }
+
+      function renderToolEditDetail(detail) {
+        return `
+          <section class="tool-detail tool-detail-edit">
+            <div class="tool-edit-header">
+              <div class="tool-edit-path">${escapeHtml(detail.path)}</div>
+            </div>
+            <div class="tool-edit-columns">
+              <div class="tool-edit-pane">
+                <div class="tool-edit-kicker">Before</div>
+                <pre class="tool-edit-code">${escapeHtml(detail.old_text || "")}</pre>
+              </div>
+              <div class="tool-edit-pane">
+                <div class="tool-edit-kicker">After</div>
+                <pre class="tool-edit-code">${escapeHtml(detail.new_text || "")}</pre>
+              </div>
+            </div>
+          </section>
+        `;
+      }
+
+      function renderToolDetails(toolCall) {
+        if (!toolCall.details || !toolCall.details.length) {
+          return '<div class="tool-detail tool-detail-empty">No details available.</div>';
+        }
+
+        return toolCall.details.map(detail => {
+          switch (detail.type) {
+            case "markdown":
+              return renderToolMarkdownDetail(detail);
+            case "terminal":
+              return renderToolTerminalDetail(detail);
+            case "edit":
+              return renderToolEditDetail(detail);
+            default:
+              return "";
+          }
+        }).join("");
+      }
+
+      function renderToolTimelineEntry(toolCall) {
+        const expanded = Boolean(state.expandedToolCalls[toolCall.id]);
+        const primaryLabel = toolCallPrimaryLabel(toolCall);
+        const inlineLabel = toolCallInlineLabel(toolCall);
+        const secondaryLabel = inlineLabel && inlineLabel !== primaryLabel ? inlineLabel : "";
+
+        return `
+          <div class="tool-row">
+            <article class="tool-card ${escapeHtml(toolCall.status)}">
+              <button class="tool-card-summary" type="button" data-tool-toggle="${escapeHtml(toolCall.id)}">
+                <div class="tool-card-head">
+                  <div class="tool-card-main">
+                    <span class="tool-card-primary">${escapeHtml(primaryLabel)}</span>
+                    ${secondaryLabel ? `<span class="tool-card-inline-separator">·</span><span class="tool-card-command">${escapeHtml(secondaryLabel)}</span>` : ""}
+                  </div>
+                  <span class="tool-card-toggle">${expanded ? "Hide details" : "Show details"}</span>
+                </div>
+              </button>
+              ${expanded ? `<div class="tool-card-details">${renderToolDetails(toolCall)}</div>` : ""}
+            </article>
+          </div>
+        `;
+      }
+
+      function renderTimeline() {
         const shouldStick = shouldAutoScroll();
-        const entries = state.snapshot.messages.slice();
+        const entries = (state.snapshot.timeline || []).slice();
         const pendingAssistantIndex = lastPendingAssistantIndex(entries);
         const showThinkingIndicator =
           !state.snapshot.streaming_text && state.snapshot.run_status === "thinking";
@@ -1248,6 +1656,7 @@ pub fn default_client_html() -> &'static str {
             };
           } else {
             entries.push({
+              type: "message",
               id: "streaming-preview",
               role: "assistant",
               status: "pending",
@@ -1270,6 +1679,7 @@ pub fn default_client_html() -> &'static str {
             };
           } else {
             entries.push({
+              type: "message",
               id: "thinking-preview",
               role: "assistant",
               status: "pending",
@@ -1283,36 +1693,32 @@ pub fn default_client_html() -> &'static str {
         }
 
         if (!entries.length) {
-          elements.messages.innerHTML = '<div class="empty">The current thread has no messages yet.</div>';
+          elements.messages.innerHTML = '<div class="empty">The current thread has no activity yet.</div>';
           if (shouldStick) {
             scrollMessagesToBottom();
           }
           return;
         }
 
-        elements.messages.innerHTML = entries.map(message => {
-          const roleLabel = message.role === "user" ? "You" : titleCase(message.role);
-          const statusLabel = message.streaming
-            ? '<span class="streaming-indicator">Streaming</span>'
-            : escapeHtml(titleCase(message.status));
-          const textBody = renderMessageBody(message);
-          const attachments = renderAttachments(message.attachments || []);
+        elements.messages.innerHTML = entries.map(entry => {
+          if (entry.type === "tool_call") {
+            return renderToolTimelineEntry(entry);
+          }
+
+          const textBody = renderMessageBody(entry);
+          const attachments = renderAttachments(entry.attachments || []);
           const body = `${textBody}${attachments}`;
 
           return `
-            <div class="message-row ${escapeHtml(message.streaming ? "streaming" : message.role)}">
+            <div class="message-row ${escapeHtml(entry.streaming ? "streaming" : entry.role)}">
               <article class="message">
-                <div class="message-meta">
-                  <span>${escapeHtml(roleLabel)}</span>
-                  <span>${statusLabel}</span>
-                </div>
                 ${body}
               </article>
             </div>
           `;
         }).join("");
 
-        elements.messages.querySelectorAll(".message-body a").forEach(link => {
+        elements.messages.querySelectorAll(".message-body a, .tool-detail-body a").forEach(link => {
           link.setAttribute("target", "_blank");
           link.setAttribute("rel", "noreferrer");
         });
@@ -1361,21 +1767,17 @@ pub fn default_client_html() -> &'static str {
         prunePermissionState();
 
         elements.sessionTitle.textContent = session ? session.title : "Waiting for a session";
-        elements.sessionSubtitle.textContent = session
-          ? (isReadOnlyMode()
-            ? "View-only link for the active Zed thread."
-            : "Live view of the active Zed thread.")
-          : "Open a thread in Zed to mirror the conversation here.";
         elements.connectionPill.textContent = titleCase(state.connectionState);
         elements.connectionPill.className = `connection ${state.connectionState}`;
         elements.activityLine.textContent = activityText();
+        elements.activityLine.className = showActivityLine() ? "activity" : "activity hidden";
         elements.composerForm.style.display = session && isReadOnlyMode() ? "none" : "";
 
         renderPermissionCard();
-        renderMessages();
+        renderTimeline();
         renderSelectedAttachments();
         renderActionButton();
-        renderFeedback();
+        renderConnectionLog();
       }
 
       function fileToUpload(file) {
@@ -1420,42 +1822,42 @@ pub fn default_client_html() -> &'static str {
         render();
       }
 
-      async function loadOlderMessages() {
+      async function loadOlderTimeline() {
         if (
-          state.loadingOlderMessages ||
-          !state.snapshot.has_more_messages_before ||
-          !state.snapshot.messages.length
+          state.loadingOlderTimeline ||
+          !state.snapshot.has_more_timeline_before ||
+          !state.snapshot.timeline.length
         ) {
           return;
         }
 
-        const beforeMessageId = state.snapshot.messages[0].id;
+        const beforeEntryId = timelineEntryId(state.snapshot.timeline[0]);
         const previousScrollHeight = elements.messages.scrollHeight;
         const previousScrollTop = elements.messages.scrollTop;
 
-        state.loadingOlderMessages = true;
+        state.loadingOlderTimeline = true;
 
         try {
-          const response = await fetch(messagesPageUrl(beforeMessageId), { cache: "no-store" });
+          const response = await fetch(timelinePageUrl(beforeEntryId), { cache: "no-store" });
           if (!response.ok) {
-            throw new Error(`Messages page failed with status ${response.status}`);
+            throw new Error(`Timeline page failed with status ${response.status}`);
           }
 
           const page = await response.json();
-          const existingIds = new Set(state.snapshot.messages.map(message => message.id));
-          const olderMessages = (page.messages || []).filter(message => !existingIds.has(message.id));
+          const existingIds = new Set((state.snapshot.timeline || []).map(timelineEntryId));
+          const olderTimeline = (page.timeline || []).filter(entry => !existingIds.has(timelineEntryId(entry)));
 
-          state.snapshot.messages = olderMessages.concat(state.snapshot.messages);
-          state.snapshot.has_more_messages_before = Boolean(page.has_more_before);
+          state.snapshot.timeline = olderTimeline.concat(state.snapshot.timeline);
+          state.snapshot.has_more_timeline_before = Boolean(page.has_more_before);
           render();
 
           const newScrollHeight = elements.messages.scrollHeight;
           elements.messages.scrollTop =
             newScrollHeight - previousScrollHeight + previousScrollTop;
         } catch (error) {
-          setFeedback(`Failed to load older messages: ${error}`, "error");
+          pushEvent(`Failed to load older activity: ${error}`, "error");
         } finally {
-          state.loadingOlderMessages = false;
+          state.loadingOlderTimeline = false;
         }
       }
 
@@ -1464,9 +1866,9 @@ pub fn default_client_html() -> &'static str {
           case "snapshot_replaced":
             applySnapshot(event.snapshot, true);
             break;
-          case "messages_changed":
-            state.snapshot.messages = mergeLatestMessages(event.messages);
-            state.snapshot.has_more_messages_before = Boolean(event.has_more_before);
+          case "timeline_changed":
+            state.snapshot.timeline = mergeLatestTimeline(event.timeline);
+            state.snapshot.has_more_timeline_before = Boolean(event.has_more_before);
             break;
           case "streaming_text_changed":
             state.snapshot.streaming_text = event.streaming_text;
@@ -1488,7 +1890,7 @@ pub fn default_client_html() -> &'static str {
       function connectSocket() {
         if (!token()) {
           state.connectionState = "error";
-          setFeedback("Missing token in companion URL.", "error");
+          pushEvent("Missing token in companion URL.", "error");
           render();
           return;
         }
@@ -1517,7 +1919,7 @@ pub fn default_client_html() -> &'static str {
           try {
             applyEvent(JSON.parse(event.data));
           } catch (error) {
-            setFeedback(`Failed to decode update: ${error}`, "error");
+            pushEvent(`Failed to decode update: ${error}`, "error");
           }
         });
 
@@ -1541,7 +1943,7 @@ pub fn default_client_html() -> &'static str {
             try {
               await loadSnapshot();
             } catch (error) {
-              setFeedback(`Reconnect snapshot failed: ${error}`, "error");
+              pushEvent(`Reconnect snapshot failed: ${error}`, "error");
             }
             connectSocket();
           }, 1500);
@@ -1568,9 +1970,9 @@ pub fn default_client_html() -> &'static str {
           state.pendingAttachments = [];
           elements.attachmentInput.value = "";
           state.forceScrollToBottom = true;
-          setFeedback("Message sent to the active Zed session.", "success");
+          pushEvent("Message sent to the active Zed session.", "success");
         } catch (error) {
-          setFeedback(`Failed to send message: ${error}`, "error");
+          pushEvent(`Failed to send message: ${error}`, "error");
         } finally {
           state.pendingSend = false;
           render();
@@ -1584,9 +1986,9 @@ pub fn default_client_html() -> &'static str {
 
         try {
           await postCommand({ type: "stop_run" });
-          setFeedback("Stop requested.", "success");
+          pushEvent("Stop requested.", "success");
         } catch (error) {
-          setFeedback(`Failed to stop run: ${error}`, "error");
+          pushEvent(`Failed to stop run: ${error}`, "error");
         }
       }
 
@@ -1607,12 +2009,12 @@ pub fn default_client_html() -> &'static str {
             option_id: optionId,
             option_kind: optionKind
           });
-          setFeedback(successMessage, "success");
+          pushEvent(successMessage, "success");
         } catch (error) {
           state.pendingAuthorization = false;
           state.pendingAuthorizationOptionId = null;
           state.pendingAuthorizationToolCallId = null;
-          setFeedback(`Failed to respond to permission request: ${error}`, "error");
+          pushEvent(`Failed to respond to permission request: ${error}`, "error");
           render();
         }
       }
@@ -1669,7 +2071,7 @@ pub fn default_client_html() -> &'static str {
         const accepted = [];
         for (const file of files) {
           if (file.size > maxAttachmentBytes) {
-            setFeedback(`${file.name} exceeds the 10 MB companion upload limit.`, "error");
+            pushEvent(`${file.name} exceeds the 10 MB companion upload limit.`, "error");
             continue;
           }
           accepted.push(file);
@@ -1696,8 +2098,51 @@ pub fn default_client_html() -> &'static str {
 
       elements.messages.addEventListener("scroll", () => {
         if (elements.messages.scrollTop <= olderMessagesThreshold) {
-          loadOlderMessages();
+          loadOlderTimeline();
         }
+      });
+
+      elements.messages.addEventListener("click", event => {
+        const toggle = event.target.closest("[data-tool-toggle]");
+        if (!toggle) {
+          return;
+        }
+
+        const toolCallId = toggle.getAttribute("data-tool-toggle");
+        if (!toolCallId) {
+          return;
+        }
+
+        state.expandedToolCalls[toolCallId] = !state.expandedToolCalls[toolCallId];
+        render();
+      });
+
+      elements.connectionPill.addEventListener("click", event => {
+        event.stopPropagation();
+        state.eventLogOpen = !state.eventLogOpen;
+        renderConnectionLog();
+      });
+
+      document.addEventListener("click", event => {
+        if (elements.connectionLog.contains(event.target) || elements.connectionPill.contains(event.target)) {
+          return;
+        }
+
+        if (!state.eventLogOpen) {
+          return;
+        }
+
+        state.eventLogOpen = false;
+        renderConnectionLog();
+      });
+
+      document.addEventListener("keydown", event => {
+        if (event.key !== "Escape" || !state.eventLogOpen) {
+          return;
+        }
+
+        state.eventLogOpen = false;
+        renderConnectionLog();
       });
 
       elements.permissionCard.addEventListener("click", event => {
@@ -1743,16 +2188,16 @@ pub fn default_client_html() -> &'static str {
 
       window.addEventListener("focus", () => {
         loadSnapshot().catch(error => {
-          setFeedback(`Refresh failed: ${error}`, "error");
+          pushEvent(`Refresh failed: ${error}`, "error");
         });
       });
 
       loadSnapshot()
         .then(() => {
-          setFeedback("Connected to the active Zed session.", "success");
+          pushEvent("Connected to the active Zed session.", "success");
         })
         .catch(error => {
-          setFeedback(`Failed to load snapshot: ${error}`, "error");
+          pushEvent(`Failed to load snapshot: ${error}`, "error");
           state.connectionState = "error";
           render();
         })

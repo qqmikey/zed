@@ -18,8 +18,8 @@ use crate::{
     CompanionCommandKind, CompanionConnectionMetadata, CompanionEvent, CompanionMessage,
     CompanionMessageRole, CompanionMessageStatus, CompanionPermissionChoice,
     CompanionPermissionOption, CompanionPermissionRequest, CompanionRunStatus,
-    CompanionSessionSummary, CompanionSnapshot, CompanionToolCall, CompanionToolCallStatus,
-    CompanionUpload,
+    CompanionSessionSummary, CompanionSnapshot, CompanionTimelineEntry, CompanionTimelineToolCall,
+    CompanionTimelineToolCallDetail, CompanionToolCall, CompanionToolCallStatus, CompanionUpload,
 };
 
 #[derive(Clone)]
@@ -192,10 +192,10 @@ impl CompanionSessionMirror {
             return;
         }
 
-        if self.snapshot.messages != new_snapshot.messages {
-            cx.emit(CompanionEvent::MessagesChanged {
-                messages: new_snapshot.messages.clone(),
-                has_more_before: new_snapshot.has_more_messages_before,
+        if self.snapshot.timeline != new_snapshot.timeline {
+            cx.emit(CompanionEvent::TimelineChanged {
+                timeline: new_snapshot.timeline.clone(),
+                has_more_before: new_snapshot.has_more_timeline_before,
             });
         }
         if self.snapshot.streaming_text != new_snapshot.streaming_text {
@@ -328,8 +328,8 @@ fn empty_state(connection: CompanionConnectionMetadata) -> CompanionMirrorState 
             protocol_version: 1,
             session: None,
             connection,
-            messages: Vec::new(),
-            has_more_messages_before: false,
+            timeline: Vec::new(),
+            has_more_timeline_before: false,
             streaming_text: None,
             tool_calls: Vec::new(),
             run_status: CompanionRunStatus::Idle,
@@ -344,7 +344,8 @@ fn state_for_acp_thread(
     connection: CompanionConnectionMetadata,
     cx: &App,
 ) -> CompanionMirrorState {
-    let mut messages = Vec::new();
+    let mut timeline = Vec::new();
+    let mut tool_calls = Vec::new();
     let mut assets = Vec::new();
 
     for (index, entry) in thread.entries().iter().enumerate() {
@@ -358,13 +359,15 @@ fn state_for_acp_thread(
                     connection.token_id.as_str(),
                 );
                 assets.extend(extracted.assets);
-                messages.push(CompanionMessage {
-                    id: message_id,
-                    role: CompanionMessageRole::User,
-                    status: CompanionMessageStatus::Done,
-                    text: extracted.text,
-                    rendered_html: extracted.rendered_html,
-                    attachments: extracted.attachments,
+                timeline.push(CompanionTimelineEntry::Message {
+                    message: CompanionMessage {
+                        id: message_id,
+                        role: CompanionMessageRole::User,
+                        status: CompanionMessageStatus::Done,
+                        text: extracted.text,
+                        rendered_html: extracted.rendered_html,
+                        attachments: extracted.attachments,
+                    },
                 });
             }
             AgentThreadEntry::AssistantMessage(message) => {
@@ -383,44 +386,35 @@ fn state_for_acp_thread(
                     CompanionMessageStatus::Done
                 };
                 assets.extend(extracted.assets);
-                messages.push(CompanionMessage {
-                    id: message_id,
-                    role: CompanionMessageRole::Assistant,
-                    status,
-                    text: extracted.text,
-                    rendered_html: extracted.rendered_html,
-                    attachments: extracted.attachments,
+                timeline.push(CompanionTimelineEntry::Message {
+                    message: CompanionMessage {
+                        id: message_id,
+                        role: CompanionMessageRole::Assistant,
+                        status,
+                        text: extracted.text,
+                        rendered_html: extracted.rendered_html,
+                        attachments: extracted.attachments,
+                    },
                 });
             }
-            AgentThreadEntry::ToolCall(_) => {}
+            AgentThreadEntry::ToolCall(tool_call) => {
+                let timeline_tool_call = companion_timeline_tool_call(
+                    tool_call,
+                    index,
+                    connection.token_id.as_str(),
+                    cx,
+                );
+                assets.extend(timeline_tool_call.assets);
+                tool_calls.push(companion_tool_call_summary(tool_call, cx));
+                timeline.push(CompanionTimelineEntry::ToolCall {
+                    tool_call: timeline_tool_call.tool_call,
+                });
+            }
         }
     }
 
-    let tool_calls = thread
-        .entries()
-        .iter()
-        .filter_map(|entry| {
-            let AgentThreadEntry::ToolCall(tool_call) = entry else {
-                return None;
-            };
-
-            Some(CompanionToolCall {
-                id: tool_call.id.to_string(),
-                title: tool_call.label.read(cx).source().to_string(),
-                summary: tool_call.tool_name.as_ref().map(ToString::to_string),
-                status: map_acp_tool_call_status(&tool_call.status),
-                permission_request: companion_permission_request_for_tool_call_status(
-                    &tool_call.status,
-                ),
-                output_preview: tool_call_output_preview(tool_call, cx),
-                started_at_unix_ms: None,
-                finished_at_unix_ms: None,
-            })
-        })
-        .collect::<Vec<_>>();
-
     let streaming_text = if thread.status() == ThreadStatus::Generating {
-        streaming_text_for_messages(&messages)
+        streaming_text_for_timeline(&timeline)
     } else {
         None
     };
@@ -433,8 +427,8 @@ fn state_for_acp_thread(
                 title: thread.title().to_string(),
             }),
             connection,
-            messages,
-            has_more_messages_before: false,
+            timeline,
+            has_more_timeline_before: false,
             streaming_text,
             tool_calls,
             run_status: map_acp_run_status(thread),
@@ -450,7 +444,7 @@ fn state_for_text_thread(
     cx: &App,
 ) -> CompanionMirrorState {
     let buffer = thread.buffer().read(cx);
-    let mut messages = Vec::new();
+    let mut timeline = Vec::new();
     let mut assets = Vec::new();
 
     for (index, message) in thread.messages(cx).enumerate() {
@@ -466,17 +460,19 @@ fn state_for_text_thread(
             connection.token_id.as_str(),
         );
         assets.extend(rendered_markdown.assets);
-        messages.push(CompanionMessage {
-            id: message_id,
-            role: map_role(message.role),
-            status: map_text_message_status(&message.status),
-            text,
-            rendered_html: rendered_markdown.rendered_html,
-            attachments: Vec::new(),
+        timeline.push(CompanionTimelineEntry::Message {
+            message: CompanionMessage {
+                id: message_id,
+                role: map_role(message.role),
+                status: map_text_message_status(&message.status),
+                text,
+                rendered_html: rendered_markdown.rendered_html,
+                attachments: Vec::new(),
+            },
         });
     }
 
-    let streaming_text = streaming_text_for_messages(&messages);
+    let streaming_text = streaming_text_for_timeline(&timeline);
 
     CompanionMirrorState {
         snapshot: CompanionSnapshot {
@@ -486,8 +482,8 @@ fn state_for_text_thread(
                 title: thread.summary().or_default().to_string(),
             }),
             connection,
-            messages,
-            has_more_messages_before: false,
+            timeline,
+            has_more_timeline_before: false,
             streaming_text,
             tool_calls: Vec::new(),
             run_status: map_text_run_status(thread, cx),
@@ -505,16 +501,284 @@ fn map_role(role: Role) -> CompanionMessageRole {
     }
 }
 
-fn streaming_text_for_messages(messages: &[CompanionMessage]) -> Option<String> {
-    messages
+fn streaming_text_for_timeline(timeline: &[CompanionTimelineEntry]) -> Option<String> {
+    timeline
         .iter()
         .rev()
-        .find(|message| {
-            message.role == CompanionMessageRole::Assistant
-                && message.status == CompanionMessageStatus::Pending
+        .find_map(|entry| match entry {
+            CompanionTimelineEntry::Message { message }
+                if message.role == CompanionMessageRole::Assistant
+                    && message.status == CompanionMessageStatus::Pending =>
+            {
+                Some(message.text.clone())
+            }
+            CompanionTimelineEntry::Message { .. } | CompanionTimelineEntry::ToolCall { .. } => {
+                None
+            }
         })
-        .map(|message| message.text.clone())
         .filter(|text| !text.is_empty())
+}
+
+struct CompanionTimelineToolCallWithAssets {
+    tool_call: CompanionTimelineToolCall,
+    assets: Vec<CompanionAsset>,
+}
+
+fn companion_tool_call_summary(tool_call: &acp_thread::ToolCall, cx: &App) -> CompanionToolCall {
+    CompanionToolCall {
+        id: tool_call.id.to_string(),
+        title: tool_call.label.read(cx).source().to_string(),
+        summary: tool_call.tool_name.as_ref().map(ToString::to_string),
+        status: map_acp_tool_call_status(&tool_call.status),
+        permission_request: companion_permission_request_for_tool_call_status(&tool_call.status),
+        output_preview: tool_call_output_preview(tool_call, cx),
+        started_at_unix_ms: None,
+        finished_at_unix_ms: None,
+    }
+}
+
+fn companion_timeline_tool_call(
+    tool_call: &acp_thread::ToolCall,
+    entry_index: usize,
+    token_id: &str,
+    cx: &App,
+) -> CompanionTimelineToolCallWithAssets {
+    let mut assets = Vec::new();
+    let entry_id = format!("tool-{}", entry_index);
+    let mut details = tool_call
+        .content
+        .iter()
+        .enumerate()
+        .filter_map(|(detail_index, content)| {
+            companion_tool_call_detail(
+                content,
+                format!("{entry_id}-detail-{detail_index}"),
+                token_id,
+                &mut assets,
+                cx,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if details.is_empty() {
+        if let Some(raw_output) = tool_call.raw_output.as_ref() {
+            let raw_output_id = format!("{entry_id}-detail-raw-output");
+            let mut attachment_index = 0;
+            let rendered_markdown = render_companion_markdown(
+                &raw_output.to_string(),
+                raw_output_id.as_str(),
+                &mut attachment_index,
+                token_id,
+            );
+            assets.extend(rendered_markdown.assets);
+            details.push(CompanionTimelineToolCallDetail::Markdown {
+                id: raw_output_id,
+                text: raw_output.to_string(),
+                rendered_html: rendered_markdown.rendered_html,
+                attachments: Vec::new(),
+            });
+        }
+    }
+
+    CompanionTimelineToolCallWithAssets {
+        tool_call: CompanionTimelineToolCall {
+            id: tool_call.id.to_string(),
+            title: tool_call.label.read(cx).source().to_string(),
+            inline_label: tool_call_inline_label(tool_call, cx),
+            summary: tool_call.tool_name.as_ref().map(ToString::to_string),
+            status: map_acp_tool_call_status(&tool_call.status),
+            output_preview: tool_call_output_preview(tool_call, cx),
+            details,
+        },
+        assets,
+    }
+}
+
+fn companion_tool_call_detail(
+    content: &acp_thread::ToolCallContent,
+    detail_id: String,
+    token_id: &str,
+    assets: &mut Vec<CompanionAsset>,
+    cx: &App,
+) -> Option<CompanionTimelineToolCallDetail> {
+    match content {
+        acp_thread::ToolCallContent::ContentBlock(content_block) => {
+            companion_tool_call_markdown_detail(content_block, detail_id, token_id, assets, cx)
+        }
+        acp_thread::ToolCallContent::Diff(diff) => {
+            let diff = diff.read(cx);
+            let path = diff.file_path(cx).unwrap_or_else(|| "Untitled".into());
+            let old_text = diff.base_text().to_string();
+            let new_text = diff.buffer().read(cx).text().to_string();
+
+            Some(CompanionTimelineToolCallDetail::Edit {
+                id: detail_id,
+                path,
+                old_text,
+                new_text,
+            })
+        }
+        acp_thread::ToolCallContent::Terminal(terminal) => {
+            let terminal = terminal.read(cx);
+            let command = terminal_command_label(&terminal, cx);
+            let (output, truncated) = terminal_output_detail(&terminal, cx);
+
+            Some(CompanionTimelineToolCallDetail::Terminal {
+                id: detail_id,
+                command,
+                working_directory: terminal
+                    .working_dir()
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                output,
+                truncated,
+            })
+        }
+    }
+}
+
+fn companion_tool_call_markdown_detail(
+    content_block: &acp_thread::ContentBlock,
+    detail_id: String,
+    token_id: &str,
+    assets: &mut Vec<CompanionAsset>,
+    cx: &App,
+) -> Option<CompanionTimelineToolCallDetail> {
+    match content_block {
+        acp_thread::ContentBlock::Empty => None,
+        acp_thread::ContentBlock::Markdown { markdown } => {
+            let text = markdown.read(cx).source().to_string();
+            let mut attachment_index = 0;
+            let rendered_markdown = render_companion_markdown(
+                &text,
+                detail_id.as_str(),
+                &mut attachment_index,
+                token_id,
+            );
+            assets.extend(rendered_markdown.assets);
+
+            Some(CompanionTimelineToolCallDetail::Markdown {
+                id: detail_id,
+                text,
+                rendered_html: rendered_markdown.rendered_html,
+                attachments: Vec::new(),
+            })
+        }
+        acp_thread::ContentBlock::ResourceLink { resource_link } => {
+            let mut content = CompanionExtractedContent::default();
+            let mut attachment_index = 0;
+            append_resource_link_content(
+                &mut content,
+                &resource_link.name,
+                &resource_link.uri,
+                resource_link.mime_type.as_deref(),
+                detail_id.as_str(),
+                &mut attachment_index,
+            );
+            let finished = content.finish(detail_id.as_str(), &mut attachment_index, token_id);
+            assets.extend(finished.assets);
+
+            Some(CompanionTimelineToolCallDetail::Markdown {
+                id: detail_id,
+                text: finished.text,
+                rendered_html: finished.rendered_html,
+                attachments: finished.attachments,
+            })
+        }
+        acp_thread::ContentBlock::Image { image } => {
+            let (attachment, asset) = image_attachment_from_rendered(image, detail_id.as_str(), 0);
+            assets.push(asset);
+
+            Some(CompanionTimelineToolCallDetail::Markdown {
+                id: detail_id,
+                text: String::new(),
+                rendered_html: None,
+                attachments: vec![attachment],
+            })
+        }
+    }
+}
+
+fn terminal_command_label(terminal: &acp_thread::Terminal, cx: &App) -> String {
+    let source = terminal.command().read(cx).source().to_string();
+    strip_fenced_code_block(&source)
+}
+
+fn strip_fenced_code_block(source: &str) -> String {
+    let trimmed = source.trim();
+    if let Some(stripped) = trimmed.strip_prefix("```")
+        && let Some((content, _)) = stripped.rsplit_once("```")
+    {
+        return content.trim().to_string();
+    }
+    trimmed.to_string()
+}
+
+fn terminal_output_detail(terminal: &acp_thread::Terminal, cx: &App) -> (Option<String>, bool) {
+    if let Some(output) = terminal.output() {
+        return (
+            (!output.content.is_empty()).then_some(output.content.clone()),
+            output.original_content_len > output.content.len(),
+        );
+    }
+
+    let content = terminal.inner().read(cx).get_content();
+    ((!content.is_empty()).then_some(content), false)
+}
+
+fn tool_call_inline_label(tool_call: &acp_thread::ToolCall, cx: &App) -> Option<String> {
+    if let Some(command) = tool_call
+        .content
+        .iter()
+        .find_map(|content| match content {
+            acp_thread::ToolCallContent::Terminal(terminal) => {
+                Some(terminal_command_label(&terminal.read(cx), cx))
+            }
+            acp_thread::ToolCallContent::ContentBlock(_) | acp_thread::ToolCallContent::Diff(_) => {
+                None
+            }
+        })
+        .filter(|command| !command.trim().is_empty())
+    {
+        return Some(truncate_preview(&command, 120));
+    }
+
+    if let Some(raw_input) = tool_call.raw_input.as_ref()
+        && let Some(label) = tool_call_inline_label_from_raw_input(raw_input)
+    {
+        return Some(truncate_preview(&label, 120));
+    }
+
+    tool_call
+        .content
+        .iter()
+        .find_map(|content| match content {
+            acp_thread::ToolCallContent::Diff(diff) => diff.read(cx).file_path(cx),
+            acp_thread::ToolCallContent::ContentBlock(_)
+            | acp_thread::ToolCallContent::Terminal(_) => None,
+        })
+        .map(|path| truncate_preview(&path, 120))
+}
+
+fn tool_call_inline_label_from_raw_input(raw_input: &serde_json::Value) -> Option<String> {
+    let object = raw_input.as_object()?;
+
+    for key in ["command", "cmd", "path", "query", "pattern", "url"] {
+        if let Some(value) = object.get(key).and_then(|value| value.as_str()) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    object.values().find_map(|value| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
 }
 
 fn map_text_message_status(status: &TextMessageStatus) -> CompanionMessageStatus {
@@ -1265,9 +1529,10 @@ fn render_companion_markdown(
         };
     }
 
+    let autolinked_text = autolink_standalone_local_paths_for_markdown(text);
     let mut events = Vec::new();
     let mut assets = Vec::new();
-    for event in Parser::new_ext(text, companion_markdown_options()) {
+    for event in Parser::new_ext(&autolinked_text, companion_markdown_options()) {
         events.push(rewrite_markdown_event(
             event,
             message_id,
@@ -1284,6 +1549,46 @@ fn render_companion_markdown(
         rendered_html: (!rendered_html.trim().is_empty()).then_some(rendered_html),
         assets,
     }
+}
+
+fn autolink_standalone_local_paths_for_markdown(text: &str) -> String {
+    let mut output = String::new();
+    let mut in_fenced_code_block = false;
+
+    for line in text.split_inclusive('\n') {
+        let trimmed_line = line.trim_end_matches(['\r', '\n']);
+        let line_ending = &line[trimmed_line.len()..];
+        let trimmed = trimmed_line.trim();
+
+        if trimmed.starts_with("```") {
+            in_fenced_code_block = !in_fenced_code_block;
+            output.push_str(line);
+            continue;
+        }
+
+        if !in_fenced_code_block
+            && !trimmed.is_empty()
+            && !trimmed.starts_with('[')
+            && !trimmed.starts_with('!')
+            && let Some(path) = local_file_path_from_link_target(trimmed)
+            && path.is_absolute()
+        {
+            let escaped_label = trimmed.replace('\\', "\\\\").replace(']', "\\]");
+            let escaped_target = trimmed.replace(')', "\\)");
+            let linked = trimmed_line.replacen(
+                trimmed,
+                format!("[{escaped_label}]({escaped_target})").as_str(),
+                1,
+            );
+            output.push_str(&linked);
+            output.push_str(line_ending);
+            continue;
+        }
+
+        output.push_str(line);
+    }
+
+    output
 }
 
 fn companion_markdown_options() -> Options {
@@ -1430,12 +1735,12 @@ mod tests {
     use super::{
         CompanionSessionMirror, CompanionSessionSource, ResourceBlockFallback,
         companion_content_from_acp_blocks, companion_permission_request_for_options, empty_state,
-        render_companion_markdown, streaming_text_for_messages, truncate_preview,
+        render_companion_markdown, streaming_text_for_timeline, truncate_preview,
     };
     use crate::{
         CompanionAccessMode, CompanionAttachment, CompanionConnectionMetadata, CompanionEvent,
         CompanionMessage, CompanionMessageRole, CompanionMessageStatus, CompanionPermissionRequest,
-        CompanionRunStatus,
+        CompanionRunStatus, CompanionTimelineEntry,
     };
 
     fn write_test_file(extension: &str, bytes: &[u8]) -> PathBuf {
@@ -1515,48 +1820,54 @@ mod tests {
         })
         .snapshot;
 
-        assert!(snapshot.messages.is_empty());
+        assert!(snapshot.timeline.is_empty());
         assert!(snapshot.tool_calls.is_empty());
         assert!(snapshot.available_commands.is_empty());
     }
 
     #[test]
     fn streaming_text_ignores_previous_completed_assistant_message() {
-        let messages = vec![
-            CompanionMessage {
-                id: "assistant-1".into(),
-                role: CompanionMessageRole::Assistant,
-                status: CompanionMessageStatus::Done,
-                text: "previous reply".into(),
-                rendered_html: None,
-                attachments: Vec::new(),
+        let timeline = vec![
+            CompanionTimelineEntry::Message {
+                message: CompanionMessage {
+                    id: "assistant-1".into(),
+                    role: CompanionMessageRole::Assistant,
+                    status: CompanionMessageStatus::Done,
+                    text: "previous reply".into(),
+                    rendered_html: None,
+                    attachments: Vec::new(),
+                },
             },
-            CompanionMessage {
-                id: "user-2".into(),
-                role: CompanionMessageRole::User,
-                status: CompanionMessageStatus::Done,
-                text: "new question".into(),
-                rendered_html: None,
-                attachments: Vec::new(),
+            CompanionTimelineEntry::Message {
+                message: CompanionMessage {
+                    id: "user-2".into(),
+                    role: CompanionMessageRole::User,
+                    status: CompanionMessageStatus::Done,
+                    text: "new question".into(),
+                    rendered_html: None,
+                    attachments: Vec::new(),
+                },
             },
         ];
 
-        assert_eq!(streaming_text_for_messages(&messages), None);
+        assert_eq!(streaming_text_for_timeline(&timeline), None);
     }
 
     #[test]
     fn streaming_text_uses_pending_assistant_message() {
-        let messages = vec![CompanionMessage {
-            id: "assistant-1".into(),
-            role: CompanionMessageRole::Assistant,
-            status: CompanionMessageStatus::Pending,
-            text: "streaming reply".into(),
-            rendered_html: None,
-            attachments: Vec::new(),
+        let timeline = vec![CompanionTimelineEntry::Message {
+            message: CompanionMessage {
+                id: "assistant-1".into(),
+                role: CompanionMessageRole::Assistant,
+                status: CompanionMessageStatus::Pending,
+                text: "streaming reply".into(),
+                rendered_html: None,
+                attachments: Vec::new(),
+            },
         }];
 
         assert_eq!(
-            streaming_text_for_messages(&messages),
+            streaming_text_for_timeline(&timeline),
             Some("streaming reply".into())
         );
     }

@@ -5,9 +5,9 @@ pub struct CompanionSnapshot {
     pub protocol_version: u32,
     pub session: Option<CompanionSessionSummary>,
     pub connection: CompanionConnectionMetadata,
-    pub messages: Vec<CompanionMessage>,
+    pub timeline: Vec<CompanionTimelineEntry>,
     #[serde(default)]
-    pub has_more_messages_before: bool,
+    pub has_more_timeline_before: bool,
     pub streaming_text: Option<String>,
     pub tool_calls: Vec<CompanionToolCall>,
     pub run_status: CompanionRunStatus,
@@ -15,8 +15,8 @@ pub struct CompanionSnapshot {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CompanionMessagesPage {
-    pub messages: Vec<CompanionMessage>,
+pub struct CompanionTimelinePage {
+    pub timeline: Vec<CompanionTimelineEntry>,
     pub has_more_before: bool,
 }
 
@@ -55,6 +55,19 @@ pub struct CompanionMessage {
     pub rendered_html: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<CompanionAttachment>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompanionTimelineEntry {
+    Message {
+        #[serde(flatten)]
+        message: CompanionMessage,
+    },
+    ToolCall {
+        #[serde(flatten)]
+        tool_call: CompanionTimelineToolCall,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -116,6 +129,50 @@ pub struct CompanionToolCall {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompanionTimelineToolCall {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub status: CompanionToolCallStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<CompanionTimelineToolCallDetail>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompanionTimelineToolCallDetail {
+    Markdown {
+        id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rendered_html: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<CompanionAttachment>,
+    },
+    Terminal {
+        id: String,
+        command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_directory: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(default)]
+        truncated: bool,
+    },
+    Edit {
+        id: String,
+        path: String,
+        old_text: String,
+        new_text: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompanionToolCallStatus {
     Pending,
@@ -160,8 +217,8 @@ pub enum CompanionEvent {
     SnapshotReplaced {
         snapshot: CompanionSnapshot,
     },
-    MessagesChanged {
-        messages: Vec<CompanionMessage>,
+    TimelineChanged {
+        timeline: Vec<CompanionTimelineEntry>,
         has_more_before: bool,
     },
     StreamingTextChanged {
@@ -226,6 +283,7 @@ mod tests {
         CompanionConnectionMetadata, CompanionEvent, CompanionMessage, CompanionMessageRole,
         CompanionMessageStatus, CompanionPermissionChoice, CompanionPermissionOption,
         CompanionPermissionRequest, CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot,
+        CompanionTimelineEntry, CompanionTimelineToolCall, CompanionTimelineToolCallDetail,
         CompanionToolCall, CompanionToolCallStatus, CompanionUpload,
     };
 
@@ -243,35 +301,64 @@ mod tests {
                 issued_at_unix_ms: Some(1_710_000_000_000),
                 expires_at_unix_ms: Some(1_710_000_300_000),
             },
-            messages: vec![
-                CompanionMessage {
-                    id: "message-1".into(),
-                    role: CompanionMessageRole::User,
-                    status: CompanionMessageStatus::Done,
-                    text: "Run the test suite".into(),
-                    rendered_html: Some("<p>Run the test suite</p>\n".into()),
-                    attachments: vec![CompanionAttachment::File {
-                        id: "attachment-1".into(),
-                        name: "test-output.txt".into(),
-                        mime_type: Some("text/plain".into()),
-                        asset_id: "asset-1".into(),
-                    }],
+            timeline: vec![
+                CompanionTimelineEntry::Message {
+                    message: CompanionMessage {
+                        id: "message-1".into(),
+                        role: CompanionMessageRole::User,
+                        status: CompanionMessageStatus::Done,
+                        text: "Run the test suite".into(),
+                        rendered_html: Some("<p>Run the test suite</p>\n".into()),
+                        attachments: vec![CompanionAttachment::File {
+                            id: "attachment-1".into(),
+                            name: "test-output.txt".into(),
+                            mime_type: Some("text/plain".into()),
+                            asset_id: "asset-1".into(),
+                        }],
+                    },
                 },
-                CompanionMessage {
-                    id: "message-2".into(),
-                    role: CompanionMessageRole::Assistant,
-                    status: CompanionMessageStatus::Pending,
-                    text: "Running tests now".into(),
-                    rendered_html: Some("<p>Running tests now</p>\n".into()),
-                    attachments: vec![CompanionAttachment::Image {
-                        id: "attachment-2".into(),
-                        name: "progress.png".into(),
-                        mime_type: "image/png".into(),
-                        asset_id: "asset-2".into(),
-                    }],
+                CompanionTimelineEntry::ToolCall {
+                    tool_call: CompanionTimelineToolCall {
+                        id: "timeline-tool-1".into(),
+                        title: "Run tests".into(),
+                        inline_label: Some("cargo test -p agent_ui".into()),
+                        summary: Some("Executing focused suite".into()),
+                        status: CompanionToolCallStatus::Running,
+                        output_preview: Some("cargo test -p agent_ui".into()),
+                        details: vec![
+                            CompanionTimelineToolCallDetail::Terminal {
+                                id: "detail-terminal-1".into(),
+                                command: "cargo test -p agent_ui".into(),
+                                working_directory: Some("/Users/q/projects/utils/zed".into()),
+                                output: Some("running 6 tests".into()),
+                                truncated: false,
+                            },
+                            CompanionTimelineToolCallDetail::Edit {
+                                id: "detail-edit-1".into(),
+                                path: "crates/agent_ui/src/agent_panel.rs".into(),
+                                old_text: "old".into(),
+                                new_text: "new".into(),
+                            },
+                        ],
+                    },
+                },
+                CompanionTimelineEntry::Message {
+                    message: CompanionMessage {
+                        id: "message-2".into(),
+                        role: CompanionMessageRole::Assistant,
+                        status: CompanionMessageStatus::Pending,
+                        text: "Running tests now".into(),
+                        rendered_html: Some("<p>Running tests now</p>\n".into()),
+                        attachments: vec![CompanionAttachment::Image {
+                            id: "attachment-2".into(),
+                            name: "progress.png".into(),
+                            mime_type: "image/png".into(),
+                            asset_id: "asset-2".into(),
+                        }],
+                    },
                 },
             ],
-            has_more_messages_before: true,
+            has_more_timeline_before: true,
             streaming_text: Some("cargo test -p agent_ui".into()),
             tool_calls: vec![CompanionToolCall {
                 id: "tool-1".into(),
@@ -321,13 +408,16 @@ mod tests {
         assert_eq!(json["protocol_version"], 1);
         assert_eq!(json["session"]["id"], "thread-1");
         assert_eq!(json["connection"]["access_mode"], "control");
-        assert_eq!(json["messages"][1]["role"], "assistant");
+        assert_eq!(json["timeline"][0]["type"], "message");
+        assert_eq!(json["timeline"][1]["type"], "tool_call");
+        assert_eq!(json["timeline"][2]["role"], "assistant");
         assert_eq!(
-            json["messages"][0]["rendered_html"],
+            json["timeline"][0]["rendered_html"],
             "<p>Run the test suite</p>\n"
         );
-        assert_eq!(json["messages"][1]["attachments"][0]["type"], "image");
-        assert_eq!(json["has_more_messages_before"], true);
+        assert_eq!(json["timeline"][1]["details"][0]["type"], "terminal");
+        assert_eq!(json["timeline"][2]["attachments"][0]["type"], "image");
+        assert_eq!(json["has_more_timeline_before"], true);
         assert_eq!(json["tool_calls"][0]["status"], "waiting_for_confirmation");
         assert_eq!(
             json["tool_calls"][0]["permission_request"]["kind"],
@@ -378,21 +468,23 @@ mod tests {
 
     #[test]
     fn event_round_trips_with_tagged_payloads() -> anyhow::Result<()> {
-        let event = CompanionEvent::MessagesChanged {
-            messages: vec![CompanionMessage {
-                id: "message-1".into(),
-                role: CompanionMessageRole::Assistant,
-                status: CompanionMessageStatus::Pending,
-                text: "Searching codebase".into(),
-                rendered_html: None,
-                attachments: Vec::new(),
+        let event = CompanionEvent::TimelineChanged {
+            timeline: vec![CompanionTimelineEntry::Message {
+                message: CompanionMessage {
+                    id: "message-1".into(),
+                    role: CompanionMessageRole::Assistant,
+                    status: CompanionMessageStatus::Pending,
+                    text: "Searching codebase".into(),
+                    rendered_html: None,
+                    attachments: Vec::new(),
+                },
             }],
             has_more_before: true,
         };
 
         let json = serde_json::to_value(&event)?;
-        assert_eq!(json["type"], "messages_changed");
-        assert_eq!(json["messages"][0]["text"], "Searching codebase");
+        assert_eq!(json["type"], "timeline_changed");
+        assert_eq!(json["timeline"][0]["text"], "Searching codebase");
         assert_eq!(json["has_more_before"], true);
 
         let round_trip: CompanionEvent = serde_json::from_value(json)?;

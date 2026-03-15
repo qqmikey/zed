@@ -18,10 +18,10 @@ use uuid::Uuid;
 pub use protocol::{
     CompanionAccessMode, CompanionAttachment, CompanionCommand, CompanionCommandKind,
     CompanionConnectionMetadata, CompanionEvent, CompanionMessage, CompanionMessageRole,
-    CompanionMessageStatus, CompanionMessagesPage, CompanionPermissionChoice,
-    CompanionPermissionOption, CompanionPermissionRequest, CompanionRunStatus,
-    CompanionSessionSummary, CompanionSnapshot, CompanionToolCall, CompanionToolCallStatus,
-    CompanionUpload,
+    CompanionMessageStatus, CompanionPermissionChoice, CompanionPermissionOption,
+    CompanionPermissionRequest, CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot,
+    CompanionTimelineEntry, CompanionTimelinePage, CompanionTimelineToolCall,
+    CompanionTimelineToolCallDetail, CompanionToolCall, CompanionToolCallStatus, CompanionUpload,
 };
 pub use server::{CompanionServerHandle, CompanionServerStart, CompanionServerState};
 pub use session_mirror::{CompanionSessionMirror, CompanionSessionSource};

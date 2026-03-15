@@ -29,13 +29,13 @@ use tokio::{
 use crate::static_client;
 use crate::{
     CompanionAccessMode, CompanionAsset, CompanionAssetDisposition, CompanionAssetSource,
-    CompanionCommand, CompanionCommandKind, CompanionEvent, CompanionMessage,
-    CompanionMessagesPage, CompanionSnapshot,
+    CompanionCommand, CompanionCommandKind, CompanionEvent, CompanionSnapshot,
+    CompanionTimelineEntry, CompanionTimelinePage,
 };
 
 const COMMAND_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
-const MESSAGE_PAGE_SIZE: usize = 40;
-const MAX_MESSAGE_PAGE_SIZE: usize = 100;
+const TIMELINE_PAGE_SIZE: usize = 40;
+const MAX_TIMELINE_PAGE_SIZE: usize = 100;
 
 #[derive(Clone)]
 pub struct CompanionServerState {
@@ -105,10 +105,10 @@ struct CompanionAuthQuery {
 }
 
 #[derive(serde::Deserialize)]
-struct CompanionMessagesQuery {
+struct CompanionTimelineQuery {
     token: String,
     #[serde(default)]
-    before_message_id: Option<String>,
+    before_entry_id: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -199,7 +199,7 @@ fn router(state: CompanionServerState) -> Router {
     Router::new()
         .route("/companion", get(companion_client))
         .route("/companion/snapshot", get(companion_snapshot))
-        .route("/companion/messages", get(companion_messages))
+        .route("/companion/timeline", get(companion_timeline))
         .route("/companion/events", get(companion_events))
         .route("/companion/assets/:asset_id", get(companion_asset))
         .route(
@@ -228,10 +228,10 @@ async fn companion_snapshot(
     )))
 }
 
-async fn companion_messages(
+async fn companion_timeline(
     State(state): State<CompanionServerState>,
-    Query(query): Query<CompanionMessagesQuery>,
-) -> Result<Json<CompanionMessagesPage>, StatusCode> {
+    Query(query): Query<CompanionTimelineQuery>,
+) -> Result<Json<CompanionTimelinePage>, StatusCode> {
     authorize(
         &state,
         &CompanionAuthQuery {
@@ -240,12 +240,12 @@ async fn companion_messages(
     )?;
     let limit = query
         .limit
-        .unwrap_or(MESSAGE_PAGE_SIZE)
-        .min(MAX_MESSAGE_PAGE_SIZE)
+        .unwrap_or(TIMELINE_PAGE_SIZE)
+        .min(MAX_TIMELINE_PAGE_SIZE)
         .max(1);
-    let page = message_page(
-        &state.snapshot_rx.borrow().messages,
-        query.before_message_id.as_deref(),
+    let page = timeline_page(
+        &state.snapshot_rx.borrow().timeline,
+        query.before_entry_id.as_deref(),
         limit,
     );
     Ok(Json(page))
@@ -364,10 +364,10 @@ fn snapshot_for_access_mode(
     access_mode: CompanionAccessMode,
 ) -> CompanionSnapshot {
     let mut snapshot = snapshot.clone();
-    let page = message_page(&snapshot.messages, None, MESSAGE_PAGE_SIZE);
+    let page = timeline_page(&snapshot.timeline, None, TIMELINE_PAGE_SIZE);
     snapshot.connection.access_mode = access_mode;
-    snapshot.messages = page.messages;
-    snapshot.has_more_messages_before = page.has_more_before;
+    snapshot.timeline = page.timeline;
+    snapshot.has_more_timeline_before = page.has_more_before;
     snapshot.available_commands =
         filter_available_commands(&snapshot.available_commands, access_mode);
     snapshot
@@ -405,10 +405,10 @@ fn windowed_event(
         CompanionEvent::SnapshotReplaced { snapshot } => CompanionEvent::SnapshotReplaced {
             snapshot: snapshot_for_access_mode(snapshot, access_mode),
         },
-        CompanionEvent::MessagesChanged { .. } => {
-            let page = message_page(&snapshot.messages, None, MESSAGE_PAGE_SIZE);
-            CompanionEvent::MessagesChanged {
-                messages: page.messages,
+        CompanionEvent::TimelineChanged { .. } => {
+            let page = timeline_page(&snapshot.timeline, None, TIMELINE_PAGE_SIZE);
+            CompanionEvent::TimelineChanged {
+                timeline: page.timeline,
                 has_more_before: page.has_more_before,
             }
         }
@@ -416,23 +416,30 @@ fn windowed_event(
     }
 }
 
-fn message_page(
-    messages: &[CompanionMessage],
-    before_message_id: Option<&str>,
+fn timeline_page(
+    timeline: &[CompanionTimelineEntry],
+    before_entry_id: Option<&str>,
     limit: usize,
-) -> CompanionMessagesPage {
-    let end = before_message_id
-        .and_then(|before_message_id| {
-            messages
+) -> CompanionTimelinePage {
+    let end = before_entry_id
+        .and_then(|before_entry_id| {
+            timeline
                 .iter()
-                .position(|message| message.id == before_message_id)
+                .position(|entry| timeline_entry_id(entry) == before_entry_id)
         })
-        .unwrap_or(messages.len());
+        .unwrap_or(timeline.len());
     let start = end.saturating_sub(limit);
 
-    CompanionMessagesPage {
-        messages: messages[start..end].to_vec(),
+    CompanionTimelinePage {
+        timeline: timeline[start..end].to_vec(),
         has_more_before: start > 0,
+    }
+}
+
+fn timeline_entry_id(entry: &CompanionTimelineEntry) -> &str {
+    match entry {
+        CompanionTimelineEntry::Message { message } => &message.id,
+        CompanionTimelineEntry::ToolCall { tool_call } => &tool_call.id,
     }
 }
 
@@ -488,8 +495,8 @@ mod tests {
     use crate::{
         CompanionAccessMode, CompanionAsset, CompanionAssetDisposition, CompanionAssetSource,
         CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata, CompanionMessage,
-        CompanionMessageRole, CompanionMessageStatus, CompanionMessagesPage, CompanionRunStatus,
-        CompanionSnapshot, CompanionUpload,
+        CompanionMessageRole, CompanionMessageStatus, CompanionRunStatus, CompanionSnapshot,
+        CompanionTimelineEntry, CompanionTimelinePage, CompanionUpload,
     };
 
     fn test_state() -> (
@@ -505,8 +512,8 @@ mod tests {
                 issued_at_unix_ms: None,
                 expires_at_unix_ms: None,
             },
-            messages: Vec::new(),
-            has_more_messages_before: false,
+            timeline: Vec::new(),
+            has_more_timeline_before: false,
             streaming_text: None,
             tool_calls: Vec::new(),
             run_status: CompanionRunStatus::Idle,
@@ -565,7 +572,6 @@ mod tests {
         let body = to_bytes(response.into_body()).await.expect("body");
         let html = String::from_utf8(body.to_vec()).expect("utf8");
         assert!(html.contains("Agent Companion"));
-        assert!(html.contains("Live view of the active Zed thread."));
         assert!(html.contains("id=\"action-button\""));
         assert!(html.contains("message-attachments"));
         assert!(html.contains("id=\"permission-card\""));
@@ -596,7 +602,7 @@ mod tests {
             CompanionAccessMode::Control
         );
         assert_eq!(snapshot.run_status, CompanionRunStatus::Idle);
-        assert!(!snapshot.has_more_messages_before);
+        assert!(!snapshot.has_more_timeline_before);
     }
 
     #[tokio::test]
@@ -615,8 +621,8 @@ mod tests {
                 issued_at_unix_ms: None,
                 expires_at_unix_ms: None,
             },
-            messages: Vec::new(),
-            has_more_messages_before: false,
+            timeline: Vec::new(),
+            has_more_timeline_before: false,
             streaming_text: None,
             tool_calls: Vec::new(),
             run_status: CompanionRunStatus::Idle,
@@ -655,16 +661,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn messages_route_returns_older_page() {
+    async fn timeline_route_returns_older_page() {
         let (state, _) = test_state();
-        let messages = (0..45)
-            .map(|index| CompanionMessage {
-                id: format!("message-{index}"),
-                role: CompanionMessageRole::Assistant,
-                status: CompanionMessageStatus::Done,
-                text: format!("message {index}"),
-                rendered_html: None,
-                attachments: Vec::new(),
+        let timeline = (0..45)
+            .map(|index| CompanionTimelineEntry::Message {
+                message: CompanionMessage {
+                    id: format!("message-{index}"),
+                    role: CompanionMessageRole::Assistant,
+                    status: CompanionMessageStatus::Done,
+                    text: format!("message {index}"),
+                    rendered_html: None,
+                    attachments: Vec::new(),
+                },
             })
             .collect::<Vec<_>>();
         let snapshot = CompanionSnapshot {
@@ -676,8 +684,8 @@ mod tests {
                 issued_at_unix_ms: None,
                 expires_at_unix_ms: None,
             },
-            messages,
-            has_more_messages_before: false,
+            timeline,
+            has_more_timeline_before: false,
             streaming_text: None,
             tool_calls: Vec::new(),
             run_status: CompanionRunStatus::Completed,
@@ -694,7 +702,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/companion/messages?token=test-token&before_message_id=message-40")
+                    .uri("/companion/timeline?token=test-token&before_entry_id=message-40")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -703,10 +711,16 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body()).await.expect("body");
-        let page: CompanionMessagesPage = serde_json::from_slice(&body).expect("messages page");
-        assert_eq!(page.messages.len(), 40);
-        assert_eq!(page.messages[0].id, "message-0");
-        assert_eq!(page.messages[39].id, "message-39");
+        let page: CompanionTimelinePage = serde_json::from_slice(&body).expect("timeline page");
+        assert_eq!(page.timeline.len(), 40);
+        assert!(matches!(
+            &page.timeline[0],
+            CompanionTimelineEntry::Message { message } if message.id == "message-0"
+        ));
+        assert!(matches!(
+            &page.timeline[39],
+            CompanionTimelineEntry::Message { message } if message.id == "message-39"
+        ));
         assert!(!page.has_more_before);
     }
 
