@@ -32,7 +32,9 @@ use zed_actions::agent::{
     ResolveConflictedFilesWithAgent, ResolveConflictsWithAgent, ReviewBranchDiff,
 };
 
-use crate::ui::{AcpOnboardingModal, ClaudeCodeOnboardingModal, HoldForDefault};
+use crate::ui::{
+    AcpOnboardingModal, ClaudeCodeOnboardingModal, HoldForDefault, MobileCompanionModal,
+};
 use crate::{
     AddContextServer, AgentDiffPane, ConnectionView, CopyThreadToClipboard, CycleStartThreadIn,
     Follow, InlineAssistant, LoadThreadFromClipboard, NewTextThread, NewThread,
@@ -1959,19 +1961,16 @@ impl AgentPanel {
     fn share_mobile_companion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let companion_manager = CompanionManager::global(cx);
 
-        if let Some(access_info) = companion_manager.read(cx).status().access_info.clone() {
+        if companion_manager.read(cx).status().access_info.is_some() {
             if let Some(source) = self.companion_session_source(cx) {
                 companion_manager.update(cx, |manager, cx| {
                     manager.set_source(Some(source), cx);
                 });
             }
 
-            Self::copy_to_clipboard_and_show_toast(
-                &self.workspace,
-                access_info.url,
-                "Mobile companion link copied to clipboard",
-                cx,
-            );
+            if let Some(workspace) = self.workspace.upgrade() {
+                MobileCompanionModal::show(&workspace, window, cx);
+            }
             return;
         }
 
@@ -1984,6 +1983,10 @@ impl AgentPanel {
             return;
         };
 
+        if let Some(workspace) = self.workspace.upgrade() {
+            MobileCompanionModal::show(&workspace, window, cx);
+        }
+
         let workspace = self.workspace.clone();
         cx.spawn_in(window, async move |_this, cx| {
             let result = companion_manager
@@ -1991,12 +1994,7 @@ impl AgentPanel {
                 .await;
 
             cx.update(|_window, cx| match &result {
-                Ok(access_info) => Self::copy_to_clipboard_and_show_toast(
-                    &workspace,
-                    access_info.url.clone(),
-                    "Mobile companion started and link copied to clipboard",
-                    cx,
-                ),
+                Ok(_) => {}
                 Err(error) => Self::show_toast(
                     &workspace,
                     format!("Failed to start mobile companion: {error}"),
@@ -2030,16 +2028,6 @@ impl AgentPanel {
                 cx,
             );
         });
-    }
-
-    fn copy_to_clipboard_and_show_toast(
-        workspace: &WeakEntity<workspace::Workspace>,
-        content: String,
-        message: impl Into<SharedString>,
-        cx: &mut App,
-    ) {
-        cx.write_to_clipboard(ClipboardItem::new_string(content));
-        Self::show_toast(workspace, message, cx);
     }
 
     fn show_deferred_toast(
@@ -3710,10 +3698,7 @@ impl AgentPanel {
                                 menu.label("Starting Mobile Companion…")
                             }
                             CompanionServiceState::Running => menu
-                                .action(
-                                    "Copy Mobile Companion Link",
-                                    Box::new(ShareMobileCompanion),
-                                )
+                                .action("Show Mobile Companion", Box::new(ShareMobileCompanion))
                                 .action("Stop Mobile Companion", Box::new(StopMobileCompanion)),
                             CompanionServiceState::Stopping => {
                                 menu.label("Stopping Mobile Companion…")
