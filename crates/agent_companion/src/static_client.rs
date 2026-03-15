@@ -1679,6 +1679,18 @@ pub fn default_client_html() -> &'static str {
         return !!dataTransfer && Array.from(dataTransfer.types || []).includes("Files");
       }
 
+      function clearComposerDragState() {
+        state.composerDragDepth = 0;
+        elements.composerForm.classList.remove("drag-active");
+      }
+
+      function canAcceptAttachmentDrop(dataTransfer) {
+        return attachmentUploadAvailable() &&
+          !state.pendingSend &&
+          !commandAvailable("stop_run") &&
+          hasFilePayload(dataTransfer);
+      }
+
       function enqueueAttachments(files) {
         if (!files.length) {
           return;
@@ -2822,10 +2834,7 @@ pub fn default_client_html() -> &'static str {
       });
 
       elements.composerForm.addEventListener("dragenter", event => {
-        if (!attachmentUploadAvailable() || state.pendingSend || commandAvailable("stop_run")) {
-          return;
-        }
-        if (!hasFilePayload(event.dataTransfer)) {
+        if (!canAcceptAttachmentDrop(event.dataTransfer)) {
           return;
         }
         event.preventDefault();
@@ -2834,10 +2843,7 @@ pub fn default_client_html() -> &'static str {
       });
 
       elements.composerForm.addEventListener("dragover", event => {
-        if (!attachmentUploadAvailable() || state.pendingSend || commandAvailable("stop_run")) {
-          return;
-        }
-        if (!hasFilePayload(event.dataTransfer)) {
+        if (!canAcceptAttachmentDrop(event.dataTransfer)) {
           return;
         }
         event.preventDefault();
@@ -2849,25 +2855,37 @@ pub fn default_client_html() -> &'static str {
         if (!hasFilePayload(event.dataTransfer)) {
           return;
         }
-        if (!elements.composerForm.contains(event.relatedTarget)) {
+
+        const shellBounds = elements.composerForm.getBoundingClientRect();
+        const pointerInsideComposer =
+          event.clientX >= shellBounds.left &&
+          event.clientX <= shellBounds.right &&
+          event.clientY >= shellBounds.top &&
+          event.clientY <= shellBounds.bottom;
+
+        if (!pointerInsideComposer && !elements.composerForm.contains(event.relatedTarget)) {
           state.composerDragDepth = Math.max(0, state.composerDragDepth - 1);
         }
-        if (state.composerDragDepth === 0) {
-          elements.composerForm.classList.remove("drag-active");
+        if (state.composerDragDepth === 0 || !pointerInsideComposer) {
+          clearComposerDragState();
         }
       });
 
       elements.composerForm.addEventListener("drop", event => {
-        if (!attachmentUploadAvailable() || state.pendingSend || commandAvailable("stop_run")) {
-          return;
-        }
-        if (!hasFilePayload(event.dataTransfer)) {
+        if (!canAcceptAttachmentDrop(event.dataTransfer)) {
           return;
         }
         event.preventDefault();
-        state.composerDragDepth = 0;
-        elements.composerForm.classList.remove("drag-active");
+        clearComposerDragState();
         enqueueAttachments(Array.from(event.dataTransfer.files || []));
+      });
+
+      window.addEventListener("dragend", clearComposerDragState);
+      window.addEventListener("blur", clearComposerDragState);
+      document.addEventListener("drop", event => {
+        if (canAcceptAttachmentDrop(event.dataTransfer)) {
+          clearComposerDragState();
+        }
       });
 
       elements.messages.addEventListener("scroll", () => {
