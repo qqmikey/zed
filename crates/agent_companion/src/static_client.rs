@@ -198,6 +198,99 @@ pub fn default_client_html() -> &'static str {
       gap: 10px;
     }
 
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      gap: 12px;
+      padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+      background: rgba(3, 6, 14, 0.92);
+      backdrop-filter: blur(14px);
+      z-index: 60;
+    }
+
+    .lightbox.hidden {
+      display: none;
+    }
+
+    .lightbox-topbar,
+    .lightbox-bottombar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .lightbox-meta {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .lightbox-counter {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-soft);
+      font-weight: 700;
+    }
+
+    .lightbox-caption {
+      font-size: 14px;
+      line-height: 1.45;
+      color: var(--text-strong);
+      word-break: break-word;
+    }
+
+    .lightbox-close,
+    .lightbox-nav {
+      appearance: none;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      min-width: 40px;
+      min-height: 40px;
+      padding: 0 14px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-strong);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .lightbox-stage {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .lightbox-viewport {
+      min-width: 0;
+      min-height: 0;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .lightbox-image {
+      display: block;
+      max-width: 100%;
+      max-height: min(74vh, 960px);
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+
     .connection-log-empty {
       font-size: 12px;
       line-height: 1.45;
@@ -1120,6 +1213,27 @@ pub fn default_client_html() -> &'static str {
       </div>
     </div>
   </div>
+  <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true" aria-labelledby="lightbox-counter">
+    <div class="lightbox-topbar">
+      <div class="lightbox-meta">
+        <div class="lightbox-counter" id="lightbox-counter"></div>
+        <div class="lightbox-caption" id="lightbox-caption"></div>
+      </div>
+      <button class="lightbox-close" id="lightbox-close" type="button">Close</button>
+    </div>
+    <div class="lightbox-stage">
+      <button class="lightbox-nav" id="lightbox-prev" type="button" aria-label="Previous image">←</button>
+      <div class="lightbox-viewport" id="lightbox-viewport">
+        <img class="lightbox-image" id="lightbox-image" alt="">
+      </div>
+      <button class="lightbox-nav" id="lightbox-next" type="button" aria-label="Next image">→</button>
+    </div>
+    <div class="lightbox-bottombar">
+      <div class="lightbox-meta">
+        <div class="lightbox-caption">Swipe or use arrow keys to navigate.</div>
+      </div>
+    </div>
+  </div>
 
   <script>
     (() => {
@@ -1158,7 +1272,13 @@ pub fn default_client_html() -> &'static str {
         reconnectAttempts: 0,
         reconnectTimer: null,
         reconnectModalOpen: false,
-        reconnectInFlight: false
+        reconnectInFlight: false,
+        lightbox: {
+          open: false,
+          images: [],
+          index: 0,
+          touchStartX: null
+        }
       };
 
       const elements = {
@@ -1176,7 +1296,15 @@ pub fn default_client_html() -> &'static str {
         connectionLog: document.getElementById("connection-log"),
         reconnectModal: document.getElementById("reconnect-modal"),
         reconnectRetryButton: document.getElementById("reconnect-retry-button"),
-        reconnectDismissButton: document.getElementById("reconnect-dismiss-button")
+        reconnectDismissButton: document.getElementById("reconnect-dismiss-button"),
+        lightbox: document.getElementById("lightbox"),
+        lightboxCounter: document.getElementById("lightbox-counter"),
+        lightboxCaption: document.getElementById("lightbox-caption"),
+        lightboxImage: document.getElementById("lightbox-image"),
+        lightboxClose: document.getElementById("lightbox-close"),
+        lightboxPrev: document.getElementById("lightbox-prev"),
+        lightboxNext: document.getElementById("lightbox-next"),
+        lightboxViewport: document.getElementById("lightbox-viewport")
       };
 
       const maxAttachmentBytes = 10 * 1024 * 1024;
@@ -2172,6 +2300,83 @@ pub fn default_client_html() -> &'static str {
         renderSelectedAttachments();
         renderActionButton();
         renderConnectionLog();
+        renderLightbox();
+      }
+
+      function currentLightboxImage() {
+        if (!state.lightbox.images.length) {
+          return null;
+        }
+
+        return state.lightbox.images[state.lightbox.index] || null;
+      }
+
+      function renderLightbox() {
+        if (!state.lightbox.open || !state.lightbox.images.length) {
+          elements.lightbox.className = "lightbox hidden";
+          return;
+        }
+
+        const currentImage = currentLightboxImage();
+        if (!currentImage) {
+          elements.lightbox.className = "lightbox hidden";
+          return;
+        }
+
+        elements.lightbox.className = "lightbox";
+        elements.lightboxCounter.textContent = `${state.lightbox.index + 1} of ${state.lightbox.images.length}`;
+        elements.lightboxCaption.textContent = currentImage.name || "";
+        elements.lightboxImage.src = currentImage.src;
+        elements.lightboxImage.alt = currentImage.name || "";
+      }
+
+      function closeLightbox() {
+        state.lightbox.open = false;
+        state.lightbox.images = [];
+        state.lightbox.index = 0;
+        state.lightbox.touchStartX = null;
+        renderLightbox();
+      }
+
+      function stepLightbox(direction) {
+        if (!state.lightbox.images.length) {
+          return;
+        }
+
+        const count = state.lightbox.images.length;
+        state.lightbox.index = (state.lightbox.index + direction + count) % count;
+        renderLightbox();
+      }
+
+      function openLightboxForGalleryItem(item) {
+        const gallery = item.closest(".inline-image-gallery");
+        if (!gallery) {
+          return;
+        }
+
+        const items = Array.from(gallery.querySelectorAll(".inline-image-item"));
+        const images = items.map(galleryItem => {
+          const image = galleryItem.querySelector("img");
+          if (!image) {
+            return null;
+          }
+
+          return {
+            src: image.getAttribute("src") || "",
+            name: image.getAttribute("alt") || ""
+          };
+        }).filter(Boolean);
+        const index = items.indexOf(item);
+
+        if (!images.length || index < 0 || !images[index] || !images[index].src) {
+          return;
+        }
+
+        state.lightbox.open = true;
+        state.lightbox.images = images;
+        state.lightbox.index = index;
+        state.lightbox.touchStartX = null;
+        renderLightbox();
       }
 
       function fileToUpload(file) {
@@ -2532,6 +2737,13 @@ pub fn default_client_html() -> &'static str {
       });
 
       elements.messages.addEventListener("click", event => {
+        const galleryItem = event.target.closest(".inline-image-item");
+        if (galleryItem && galleryItem.querySelector("img")) {
+          event.preventDefault();
+          openLightboxForGalleryItem(galleryItem);
+          return;
+        }
+
         const assetLink = event.target.closest("a[href*=\"/companion/assets/\"]");
         if (assetLink) {
           event.preventDefault();
@@ -2569,7 +2781,53 @@ pub fn default_client_html() -> &'static str {
         render();
       });
 
+      elements.lightboxClose.addEventListener("click", () => {
+        closeLightbox();
+      });
+
+      elements.lightboxPrev.addEventListener("click", event => {
+        event.stopPropagation();
+        stepLightbox(-1);
+      });
+
+      elements.lightboxNext.addEventListener("click", event => {
+        event.stopPropagation();
+        stepLightbox(1);
+      });
+
+      elements.lightbox.addEventListener("click", event => {
+        if (event.target === elements.lightbox) {
+          closeLightbox();
+        }
+      });
+
+      elements.lightboxViewport.addEventListener("touchstart", event => {
+        const touch = event.touches[0];
+        state.lightbox.touchStartX = touch ? touch.clientX : null;
+      }, { passive: true });
+
+      elements.lightboxViewport.addEventListener("touchend", event => {
+        if (state.lightbox.touchStartX === null) {
+          return;
+        }
+
+        const touch = event.changedTouches[0];
+        const touchEndX = touch ? touch.clientX : state.lightbox.touchStartX;
+        const deltaX = touchEndX - state.lightbox.touchStartX;
+        state.lightbox.touchStartX = null;
+
+        if (Math.abs(deltaX) < 40) {
+          return;
+        }
+
+        stepLightbox(deltaX < 0 ? 1 : -1);
+      }, { passive: true });
+
       document.addEventListener("click", event => {
+        if (state.lightbox.open && elements.lightbox.contains(event.target)) {
+          return;
+        }
+
         if (elements.connectionLog.contains(event.target) || elements.connectionPill.contains(event.target)) {
           return;
         }
@@ -2583,6 +2841,23 @@ pub fn default_client_html() -> &'static str {
       });
 
       document.addEventListener("keydown", event => {
+        if (state.lightbox.open) {
+          if (event.key === "Escape") {
+            closeLightbox();
+            return;
+          }
+
+          if (event.key === "ArrowLeft") {
+            stepLightbox(-1);
+            return;
+          }
+
+          if (event.key === "ArrowRight") {
+            stepLightbox(1);
+            return;
+          }
+        }
+
         if (event.key !== "Escape" || !state.eventLogOpen) {
           return;
         }
