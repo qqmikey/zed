@@ -1322,8 +1322,8 @@ mod tests {
         extract_local_markdown_attachments, streaming_text_for_messages, truncate_preview,
     };
     use crate::{
-        CompanionAttachment, CompanionConnectionMetadata, CompanionEvent, CompanionMessage,
-        CompanionMessageRole, CompanionMessageStatus, CompanionPermissionRequest,
+        CompanionAccessMode, CompanionAttachment, CompanionConnectionMetadata, CompanionEvent,
+        CompanionMessage, CompanionMessageRole, CompanionMessageStatus, CompanionPermissionRequest,
         CompanionRunStatus,
     };
 
@@ -1350,6 +1350,7 @@ mod tests {
         let mirror = cx.new(|_| {
             CompanionSessionMirror::new(CompanionConnectionMetadata {
                 token_id: "token-1".into(),
+                access_mode: CompanionAccessMode::Control,
                 issued_at_unix_ms: None,
                 expires_at_unix_ms: None,
             })
@@ -1387,6 +1388,7 @@ mod tests {
     fn empty_snapshot_has_no_commands() {
         let snapshot = empty_state(CompanionConnectionMetadata {
             token_id: "token-1".into(),
+            access_mode: CompanionAccessMode::Control,
             issued_at_unix_ms: None,
             expires_at_unix_ms: None,
         })

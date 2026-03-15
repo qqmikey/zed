@@ -28,8 +28,9 @@ use tokio::{
 
 use crate::static_client;
 use crate::{
-    CompanionAsset, CompanionAssetDisposition, CompanionAssetSource, CompanionCommand,
-    CompanionEvent, CompanionMessage, CompanionMessagesPage, CompanionSnapshot,
+    CompanionAccessMode, CompanionAsset, CompanionAssetDisposition, CompanionAssetSource,
+    CompanionCommand, CompanionCommandKind, CompanionEvent, CompanionMessage,
+    CompanionMessagesPage, CompanionSnapshot,
 };
 
 const COMMAND_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
@@ -42,6 +43,7 @@ pub struct CompanionServerState {
     snapshot_rx: watch::Receiver<CompanionSnapshot>,
     event_tx: broadcast::Sender<CompanionEvent>,
     command_tx: UnboundedSender<CompanionCommand>,
+    access_mode: Arc<RwLock<CompanionAccessMode>>,
     assets: Arc<RwLock<HashMap<String, CompanionAsset>>>,
     client_html: Arc<str>,
 }
@@ -54,6 +56,7 @@ pub struct CompanionServerStart {
 pub struct CompanionServerHandle {
     snapshot_tx: watch::Sender<CompanionSnapshot>,
     event_tx: broadcast::Sender<CompanionEvent>,
+    access_mode: Arc<RwLock<CompanionAccessMode>>,
     assets: Arc<RwLock<HashMap<String, CompanionAsset>>>,
     shutdown_tx: watch::Sender<bool>,
     join_handle: JoinHandle<Result<()>>,
@@ -71,6 +74,12 @@ impl CompanionServerHandle {
 
     pub fn publish_event(&self, event: CompanionEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    pub fn set_access_mode(&self, access_mode: CompanionAccessMode) {
+        if let Ok(mut current_access_mode) = self.access_mode.write() {
+            *current_access_mode = access_mode;
+        }
     }
 
     pub fn replace_assets(&self, assets: Vec<CompanionAsset>) {
@@ -108,6 +117,7 @@ pub async fn start_server(
     initial_snapshot: CompanionSnapshot,
     initial_assets: Vec<CompanionAsset>,
     token_id: String,
+    access_mode: CompanionAccessMode,
     client_html: String,
 ) -> Result<CompanionServerStart> {
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
@@ -121,6 +131,7 @@ pub async fn start_server(
     let (event_tx, _) = broadcast::channel(64);
     let (command_tx, command_rx) = mpsc::unbounded();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let access_mode = Arc::new(RwLock::new(access_mode));
     let assets = Arc::new(RwLock::new(
         initial_assets
             .into_iter()
@@ -133,6 +144,7 @@ pub async fn start_server(
         snapshot_rx,
         event_tx: event_tx.clone(),
         command_tx,
+        access_mode: access_mode.clone(),
         assets: assets.clone(),
         client_html: Arc::from(client_html),
     };
@@ -169,6 +181,7 @@ pub async fn start_server(
         handle: CompanionServerHandle {
             snapshot_tx,
             event_tx,
+            access_mode,
             assets,
             shutdown_tx,
             join_handle,
@@ -209,7 +222,10 @@ async fn companion_snapshot(
     Query(query): Query<CompanionAuthQuery>,
 ) -> Result<Json<CompanionSnapshot>, StatusCode> {
     authorize(&state, &query)?;
-    Ok(Json(windowed_snapshot(&state.snapshot_rx.borrow())))
+    Ok(Json(snapshot_for_access_mode(
+        &state.snapshot_rx.borrow(),
+        current_access_mode(&state),
+    )))
 }
 
 async fn companion_messages(
@@ -241,6 +257,9 @@ async fn companion_command(
     Json(command): Json<CompanionCommand>,
 ) -> Result<StatusCode, StatusCode> {
     authorize(&state, &query)?;
+    if current_access_mode(&state) == CompanionAccessMode::ReadOnly {
+        return Err(StatusCode::FORBIDDEN);
+    }
     state
         .command_tx
         .unbounded_send(command)
@@ -306,7 +325,11 @@ async fn stream_events(mut socket: WebSocket, state: CompanionServerState) {
     loop {
         match receiver.recv().await {
             Ok(event) => {
-                let event = windowed_event(&event, &state.snapshot_rx.borrow());
+                let event = windowed_event(
+                    &event,
+                    &state.snapshot_rx.borrow(),
+                    current_access_mode(&state),
+                );
                 let Ok(payload) = serde_json::to_string(&event) else {
                     break;
                 };
@@ -328,18 +351,59 @@ fn authorize(state: &CompanionServerState, query: &CompanionAuthQuery) -> Result
     }
 }
 
-fn windowed_snapshot(snapshot: &CompanionSnapshot) -> CompanionSnapshot {
+fn current_access_mode(state: &CompanionServerState) -> CompanionAccessMode {
+    state
+        .access_mode
+        .read()
+        .map(|access_mode| *access_mode)
+        .unwrap_or(CompanionAccessMode::Control)
+}
+
+fn snapshot_for_access_mode(
+    snapshot: &CompanionSnapshot,
+    access_mode: CompanionAccessMode,
+) -> CompanionSnapshot {
     let mut snapshot = snapshot.clone();
     let page = message_page(&snapshot.messages, None, MESSAGE_PAGE_SIZE);
+    snapshot.connection.access_mode = access_mode;
     snapshot.messages = page.messages;
     snapshot.has_more_messages_before = page.has_more_before;
+    snapshot.available_commands =
+        filter_available_commands(&snapshot.available_commands, access_mode);
     snapshot
 }
 
-fn windowed_event(event: &CompanionEvent, snapshot: &CompanionSnapshot) -> CompanionEvent {
+fn filter_available_commands(
+    available_commands: &[CompanionCommandKind],
+    access_mode: CompanionAccessMode,
+) -> Vec<CompanionCommandKind> {
+    if access_mode == CompanionAccessMode::Control {
+        return available_commands.to_vec();
+    }
+
+    available_commands
+        .iter()
+        .filter(|command| {
+            !matches!(
+                command,
+                CompanionCommandKind::SendMessage
+                    | CompanionCommandKind::SendAttachments
+                    | CompanionCommandKind::AuthorizeToolCall
+                    | CompanionCommandKind::StopRun
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+fn windowed_event(
+    event: &CompanionEvent,
+    snapshot: &CompanionSnapshot,
+    access_mode: CompanionAccessMode,
+) -> CompanionEvent {
     match event {
         CompanionEvent::SnapshotReplaced { snapshot } => CompanionEvent::SnapshotReplaced {
-            snapshot: windowed_snapshot(snapshot),
+            snapshot: snapshot_for_access_mode(snapshot, access_mode),
         },
         CompanionEvent::MessagesChanged { .. } => {
             let page = message_page(&snapshot.messages, None, MESSAGE_PAGE_SIZE);
@@ -407,25 +471,25 @@ fn sanitize_filename(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
 
     use axum::http::{
         Method, Request,
         header::{CONTENT_DISPOSITION, CONTENT_TYPE},
     };
     use axum::{body::Body, http::StatusCode};
-    use futures::StreamExt as _;
     use futures::channel::mpsc;
+    use futures::{FutureExt as _, StreamExt as _};
     use hyper::body::to_bytes;
     use tokio::sync::{broadcast, watch};
     use tower::ServiceExt as _;
 
     use super::{CompanionServerState, default_client_html, router};
     use crate::{
-        CompanionAsset, CompanionAssetDisposition, CompanionAssetSource, CompanionCommand,
-        CompanionConnectionMetadata, CompanionMessage, CompanionMessageRole,
-        CompanionMessageStatus, CompanionMessagesPage, CompanionRunStatus, CompanionSnapshot,
-        CompanionUpload,
+        CompanionAccessMode, CompanionAsset, CompanionAssetDisposition, CompanionAssetSource,
+        CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata, CompanionMessage,
+        CompanionMessageRole, CompanionMessageStatus, CompanionMessagesPage, CompanionRunStatus,
+        CompanionSnapshot, CompanionUpload,
     };
 
     fn test_state() -> (
@@ -437,6 +501,7 @@ mod tests {
             session: None,
             connection: CompanionConnectionMetadata {
                 token_id: "test-token".into(),
+                access_mode: CompanionAccessMode::Control,
                 issued_at_unix_ms: None,
                 expires_at_unix_ms: None,
             },
@@ -457,6 +522,7 @@ mod tests {
                 snapshot_rx,
                 event_tx,
                 command_tx,
+                access_mode: Arc::new(RwLock::new(CompanionAccessMode::Control)),
                 assets: Arc::default(),
                 client_html: Arc::from(default_client_html().to_string()),
             },
@@ -525,8 +591,67 @@ mod tests {
         let body = to_bytes(response.into_body()).await.expect("body");
         let snapshot: CompanionSnapshot = serde_json::from_slice(&body).expect("snapshot");
         assert_eq!(snapshot.connection.token_id, "test-token");
+        assert_eq!(
+            snapshot.connection.access_mode,
+            CompanionAccessMode::Control
+        );
         assert_eq!(snapshot.run_status, CompanionRunStatus::Idle);
         assert!(!snapshot.has_more_messages_before);
+    }
+
+    #[tokio::test]
+    async fn snapshot_route_filters_mutating_commands_in_read_only_mode() {
+        let (state, _) = test_state();
+        if let Ok(mut access_mode) = state.access_mode.write() {
+            *access_mode = CompanionAccessMode::ReadOnly;
+        }
+
+        let snapshot = CompanionSnapshot {
+            protocol_version: 1,
+            session: None,
+            connection: CompanionConnectionMetadata {
+                token_id: "test-token".into(),
+                access_mode: CompanionAccessMode::Control,
+                issued_at_unix_ms: None,
+                expires_at_unix_ms: None,
+            },
+            messages: Vec::new(),
+            has_more_messages_before: false,
+            streaming_text: None,
+            tool_calls: Vec::new(),
+            run_status: CompanionRunStatus::Idle,
+            available_commands: vec![
+                CompanionCommandKind::SendMessage,
+                CompanionCommandKind::SendAttachments,
+                CompanionCommandKind::AuthorizeToolCall,
+                CompanionCommandKind::StopRun,
+            ],
+        };
+        let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
+        let _snapshot_tx = snapshot_tx;
+        let state = CompanionServerState {
+            snapshot_rx,
+            ..state
+        };
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/companion/snapshot?token=test-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body()).await.expect("body");
+        let snapshot: CompanionSnapshot = serde_json::from_slice(&body).expect("snapshot");
+        assert_eq!(
+            snapshot.connection.access_mode,
+            CompanionAccessMode::ReadOnly
+        );
+        assert!(snapshot.available_commands.is_empty());
     }
 
     #[tokio::test]
@@ -546,6 +671,7 @@ mod tests {
             session: None,
             connection: CompanionConnectionMetadata {
                 token_id: "test-token".into(),
+                access_mode: CompanionAccessMode::Control,
                 issued_at_unix_ms: None,
                 expires_at_unix_ms: None,
             },
@@ -614,6 +740,41 @@ mod tests {
                 attachments: Vec::new(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn command_route_is_forbidden_in_read_only_mode() {
+        let (state, mut command_rx) = test_state();
+        if let Ok(mut access_mode) = state.access_mode.write() {
+            *access_mode = CompanionAccessMode::ReadOnly;
+        }
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/companion/command?token=test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CompanionCommand::SendMessage {
+                            text: "hello from mobile".into(),
+                            attachments: Vec::new(),
+                        })
+                        .expect("json"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!matches!(
+            command_rx.next().now_or_never(),
+            Some(Some(CompanionCommand::SendMessage { .. }))
+                | Some(Some(CompanionCommand::AuthorizeToolCall { .. }))
+                | Some(Some(CompanionCommand::StopRun))
+        ));
     }
 
     #[tokio::test]

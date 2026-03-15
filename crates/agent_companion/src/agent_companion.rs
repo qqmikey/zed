@@ -16,11 +16,12 @@ use std::{
 use uuid::Uuid;
 
 pub use protocol::{
-    CompanionAttachment, CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata,
-    CompanionEvent, CompanionMessage, CompanionMessageRole, CompanionMessageStatus,
-    CompanionMessagesPage, CompanionPermissionChoice, CompanionPermissionOption,
-    CompanionPermissionRequest, CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot,
-    CompanionToolCall, CompanionToolCallStatus, CompanionUpload,
+    CompanionAccessMode, CompanionAttachment, CompanionCommand, CompanionCommandKind,
+    CompanionConnectionMetadata, CompanionEvent, CompanionMessage, CompanionMessageRole,
+    CompanionMessageStatus, CompanionMessagesPage, CompanionPermissionChoice,
+    CompanionPermissionOption, CompanionPermissionRequest, CompanionRunStatus,
+    CompanionSessionSummary, CompanionSnapshot, CompanionToolCall, CompanionToolCallStatus,
+    CompanionUpload,
 };
 pub use server::{CompanionServerHandle, CompanionServerStart, CompanionServerState};
 pub use session_mirror::{CompanionSessionMirror, CompanionSessionSource};
@@ -31,6 +32,7 @@ pub struct CompanionManagerStatus {
     pub selection_mode: CompanionSessionMode,
     pub shared_session: Option<CompanionSessionSummary>,
     pub access_info: Option<CompanionAccessInfo>,
+    pub access_mode: CompanionAccessMode,
     pub settings: MobileCompanionSettings,
 }
 
@@ -145,6 +147,7 @@ impl CompanionManager {
         let mirror = cx.new(|_| {
             CompanionSessionMirror::new(CompanionConnectionMetadata {
                 token_id: String::new(),
+                access_mode: CompanionAccessMode::Control,
                 issued_at_unix_ms: None,
                 expires_at_unix_ms: None,
             })
@@ -168,6 +171,23 @@ impl CompanionManager {
 
     pub fn status(&self) -> &CompanionManagerStatus {
         &self.status
+    }
+
+    pub fn set_access_mode(&mut self, access_mode: CompanionAccessMode, cx: &mut Context<Self>) {
+        if self.status.access_mode == access_mode {
+            return;
+        }
+
+        self.status.access_mode = access_mode;
+
+        if let Some(server) = &self.server {
+            server.set_access_mode(access_mode);
+            let snapshot = self.mirror.read(cx).snapshot().clone();
+            server.publish_snapshot(snapshot.clone());
+            server.publish_event(CompanionEvent::SnapshotReplaced { snapshot });
+        }
+
+        self.emit_status(cx);
     }
 
     pub fn set_follow_source(
@@ -207,6 +227,7 @@ impl CompanionManager {
         let token_id = Uuid::new_v4().to_string();
         let connection = CompanionConnectionMetadata {
             token_id: token_id.clone(),
+            access_mode: self.status.access_mode,
             issued_at_unix_ms: unix_time_ms(),
             expires_at_unix_ms: None,
         };
@@ -225,6 +246,7 @@ impl CompanionManager {
                 initial_snapshot,
                 initial_assets,
                 token_id,
+                self.status.access_mode,
                 server::default_client_html().to_string(),
             ),
         );
@@ -259,6 +281,7 @@ impl CompanionManager {
                         mirror.set_connection(
                             CompanionConnectionMetadata {
                                 token_id: String::new(),
+                                access_mode: this.status.access_mode,
                                 issued_at_unix_ms: None,
                                 expires_at_unix_ms: None,
                             },
@@ -288,6 +311,7 @@ impl CompanionManager {
             mirror.set_connection(
                 CompanionConnectionMetadata {
                     token_id: String::new(),
+                    access_mode: self.status.access_mode,
                     issued_at_unix_ms: None,
                     expires_at_unix_ms: None,
                 },

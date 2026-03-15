@@ -695,6 +695,9 @@ pub fn default_client_html() -> &'static str {
       const state = {
         snapshot: {
           session: null,
+          connection: {
+            access_mode: "control"
+          },
           messages: [],
           has_more_messages_before: false,
           streaming_text: null,
@@ -781,6 +784,10 @@ pub fn default_client_html() -> &'static str {
 
       function commandAvailable(kind) {
         return state.snapshot.available_commands.includes(kind);
+      }
+
+      function isReadOnlyMode() {
+        return state.snapshot.connection && state.snapshot.connection.access_mode === "read_only";
       }
 
       function attachmentUploadAvailable() {
@@ -1257,11 +1264,14 @@ pub fn default_client_html() -> &'static str {
 
         elements.sessionTitle.textContent = session ? session.title : "Waiting for a session";
         elements.sessionSubtitle.textContent = session
-          ? "Live view of the active Zed thread."
+          ? (isReadOnlyMode()
+            ? "View-only link for the active Zed thread."
+            : "Live view of the active Zed thread.")
           : "Open a thread in Zed to mirror the conversation here.";
         elements.connectionPill.textContent = titleCase(state.connectionState);
         elements.connectionPill.className = `connection ${state.connectionState}`;
         elements.activityLine.textContent = activityText();
+        elements.composerForm.style.display = session && isReadOnlyMode() ? "none" : "";
 
         renderPermissionCard();
         renderMessages();

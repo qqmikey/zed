@@ -29,10 +29,20 @@ pub struct CompanionSessionSummary {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CompanionConnectionMetadata {
     pub token_id: String,
+    #[serde(default)]
+    pub access_mode: CompanionAccessMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issued_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_unix_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompanionAccessMode {
+    ReadOnly,
+    #[default]
+    Control,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -210,11 +220,11 @@ pub struct CompanionUpload {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompanionAttachment, CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata,
-        CompanionEvent, CompanionMessage, CompanionMessageRole, CompanionMessageStatus,
-        CompanionPermissionChoice, CompanionPermissionOption, CompanionPermissionRequest,
-        CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot, CompanionToolCall,
-        CompanionToolCallStatus, CompanionUpload,
+        CompanionAccessMode, CompanionAttachment, CompanionCommand, CompanionCommandKind,
+        CompanionConnectionMetadata, CompanionEvent, CompanionMessage, CompanionMessageRole,
+        CompanionMessageStatus, CompanionPermissionChoice, CompanionPermissionOption,
+        CompanionPermissionRequest, CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot,
+        CompanionToolCall, CompanionToolCallStatus, CompanionUpload,
     };
 
     #[test]
@@ -227,6 +237,7 @@ mod tests {
             }),
             connection: CompanionConnectionMetadata {
                 token_id: "token-1".into(),
+                access_mode: CompanionAccessMode::Control,
                 issued_at_unix_ms: Some(1_710_000_000_000),
                 expires_at_unix_ms: Some(1_710_000_300_000),
             },
@@ -305,6 +316,7 @@ mod tests {
         let json = serde_json::to_value(&snapshot)?;
         assert_eq!(json["protocol_version"], 1);
         assert_eq!(json["session"]["id"], "thread-1");
+        assert_eq!(json["connection"]["access_mode"], "control");
         assert_eq!(json["messages"][1]["role"], "assistant");
         assert_eq!(json["messages"][1]["attachments"][0]["type"], "image");
         assert_eq!(json["has_more_messages_before"], true);

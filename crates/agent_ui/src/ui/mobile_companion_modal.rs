@@ -1,11 +1,15 @@
 use agent_companion::{
-    CompanionManager, CompanionManagerEvent, CompanionServiceState, CompanionSessionMode,
+    CompanionAccessMode, CompanionManager, CompanionManagerEvent, CompanionServiceState,
+    CompanionSessionMode,
 };
 use gpui::{
     Action, App, ClickEvent, ClipboardItem, Context, DismissEvent, Entity, EventEmitter,
     FocusHandle, Focusable, Subscription, Window,
 };
-use ui::{Modal, ModalFooter, ModalHeader, Section, SectionHeader, TintColor, prelude::*};
+use ui::{
+    Modal, ModalFooter, ModalHeader, Section, SectionHeader, Switch, TintColor, ToggleState,
+    prelude::*,
+};
 use workspace::{ModalView, Toast, Workspace, notifications::NotificationId};
 
 pub struct MobileCompanionModal {
@@ -220,6 +224,49 @@ impl MobileCompanionModal {
                     .child(body),
             )
     }
+
+    fn render_access_controls(
+        &self,
+        status: &agent_companion::CompanionManagerStatus,
+        _cx: &mut Context<Self>,
+    ) -> Section {
+        let is_running = matches!(status.state, CompanionServiceState::Running);
+        let toggle_state = if status.access_mode == CompanionAccessMode::ReadOnly {
+            ToggleState::Selected
+        } else {
+            ToggleState::Unselected
+        };
+        let companion_manager = self.companion_manager.clone();
+
+        Section::new_contained()
+            .header(SectionHeader::new("Access"))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .child(
+                        Switch::new("mobile-companion-read-only", toggle_state)
+                            .label("Read-only")
+                            .disabled(!is_running)
+                            .on_click(move |state, _window, cx| {
+                                let access_mode = if *state == ToggleState::Selected {
+                                    CompanionAccessMode::ReadOnly
+                                } else {
+                                    CompanionAccessMode::Control
+                                };
+                                companion_manager
+                                    .update(cx, |manager, cx| manager.set_access_mode(access_mode, cx));
+                            }),
+                    )
+                    .child(
+                        Label::new(
+                            "When enabled, the current shared link becomes view-only and can no longer reply, approve, or stop runs.",
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    ),
+            )
+    }
 }
 
 impl EventEmitter<DismissEvent> for MobileCompanionModal {}
@@ -269,6 +316,7 @@ impl Render for MobileCompanionModal {
                             .show_dismiss_button(true),
                     )
                     .section(self.render_status_copy(&status, cx))
+                    .section(self.render_access_controls(&status, cx))
                     .footer(
                         ModalFooter::new()
                             .start_slot(
