@@ -241,6 +241,78 @@ pub fn default_client_html() -> &'static str {
       font-size: 14px;
     }
 
+    .message-attachments {
+      display: grid;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .attachment-image {
+      display: block;
+      width: 100%;
+      max-width: 100%;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.03);
+      overflow: hidden;
+    }
+
+    .attachment-image img {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-height: 420px;
+      object-fit: contain;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .attachment-file,
+    .attachment-link {
+      display: grid;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .attachment-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-strong);
+      word-break: break-word;
+    }
+
+    .attachment-meta {
+      font-size: 12px;
+      color: var(--text-soft);
+    }
+
+    .attachment-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .attachment-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
+      padding: 0 12px;
+      border-radius: 999px;
+      color: var(--action-text);
+      background: rgba(47, 111, 235, 0.86);
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .attachment-action.secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-strong);
+    }
+
     .streaming-indicator {
       display: inline-flex;
       align-items: center;
@@ -465,6 +537,10 @@ pub fn default_client_html() -> &'static str {
           .replaceAll('"', "&quot;");
       }
 
+      function assetUrl(assetId) {
+        return apiPath(`/companion/assets/${encodeURIComponent(assetId)}`);
+      }
+
       function titleCase(value) {
         return value
           .split("_")
@@ -532,31 +608,106 @@ pub fn default_client_html() -> &'static str {
         elements.messages.scrollTop = elements.messages.scrollHeight;
       }
 
+      function lastPendingAssistantIndex(entries) {
+        for (let index = entries.length - 1; index >= 0; index -= 1) {
+          const entry = entries[index];
+          if (entry.role === "assistant" && entry.status === "pending") {
+            return index;
+          }
+        }
+
+        return -1;
+      }
+
+      function renderAttachments(attachments) {
+        if (!attachments || !attachments.length) {
+          return "";
+        }
+
+        return `
+          <div class="message-attachments">
+            ${attachments.map(attachment => {
+              switch (attachment.type) {
+                case "image":
+                  return `
+                    <a class="attachment-image" href="${escapeHtml(assetUrl(attachment.asset_id))}" target="_blank" rel="noreferrer">
+                      <img src="${escapeHtml(assetUrl(attachment.asset_id))}" alt="${escapeHtml(attachment.name)}" loading="lazy">
+                    </a>
+                  `;
+                case "file":
+                  return `
+                    <div class="attachment-file">
+                      <div class="attachment-title">${escapeHtml(attachment.name)}</div>
+                      ${attachment.mime_type ? `<div class="attachment-meta">${escapeHtml(attachment.mime_type)}</div>` : ""}
+                      <div class="attachment-actions">
+                        <a class="attachment-action" href="${escapeHtml(assetUrl(attachment.asset_id))}" target="_blank" rel="noreferrer">Open</a>
+                        <a class="attachment-action secondary" href="${escapeHtml(assetUrl(attachment.asset_id))}" download="${escapeHtml(attachment.name)}">Download</a>
+                      </div>
+                    </div>
+                  `;
+                case "link":
+                  return `
+                    <div class="attachment-link">
+                      <div class="attachment-title">${escapeHtml(attachment.name)}</div>
+                      <div class="attachment-actions">
+                        <a class="attachment-action" href="${escapeHtml(attachment.url)}" target="_blank" rel="noreferrer">Open link</a>
+                      </div>
+                    </div>
+                  `;
+                default:
+                  return "";
+              }
+            }).join("")}
+          </div>
+        `;
+      }
+
       function renderMessages() {
         const shouldStick = shouldAutoScroll();
         const entries = state.snapshot.messages.slice();
+        const pendingAssistantIndex = lastPendingAssistantIndex(entries);
         const showThinkingIndicator =
           !state.snapshot.streaming_text && state.snapshot.run_status === "thinking";
 
         if (state.snapshot.streaming_text) {
-          entries.push({
-            id: "streaming-preview",
-            role: "assistant",
-            status: "pending",
-            text: state.snapshot.streaming_text,
-            streaming: true
-          });
+          if (pendingAssistantIndex >= 0) {
+            entries[pendingAssistantIndex] = {
+              ...entries[pendingAssistantIndex],
+              text: state.snapshot.streaming_text,
+              streaming: true,
+              placeholder: false
+            };
+          } else {
+            entries.push({
+              id: "streaming-preview",
+              role: "assistant",
+              status: "pending",
+              text: state.snapshot.streaming_text,
+              attachments: [],
+              streaming: true
+            });
+          }
         }
 
         if (showThinkingIndicator) {
-          entries.push({
-            id: "thinking-preview",
-            role: "assistant",
-            status: "pending",
-            text: "",
-            streaming: true,
-            placeholder: true
-          });
+          if (pendingAssistantIndex >= 0) {
+            entries[pendingAssistantIndex] = {
+              ...entries[pendingAssistantIndex],
+              text: "",
+              streaming: true,
+              placeholder: true
+            };
+          } else {
+            entries.push({
+              id: "thinking-preview",
+              role: "assistant",
+              status: "pending",
+              text: "",
+              attachments: [],
+              streaming: true,
+              placeholder: true
+            });
+          }
         }
 
         if (!entries.length) {
@@ -572,9 +723,11 @@ pub fn default_client_html() -> &'static str {
           const statusLabel = message.streaming
             ? '<span class="streaming-indicator">Streaming</span>'
             : escapeHtml(titleCase(message.status));
-          const body = message.placeholder
+          const textBody = message.placeholder
             ? '<div class="message-body"><span class="streaming-indicator">Thinking</span></div>'
-            : `<div class="message-body">${escapeHtml(message.text)}</div>`;
+            : (message.text ? `<div class="message-body">${escapeHtml(message.text)}</div>` : "");
+          const attachments = renderAttachments(message.attachments || []);
+          const body = `${textBody}${attachments}`;
 
           return `
             <div class="message-row ${escapeHtml(message.streaming ? "streaming" : message.role)}">

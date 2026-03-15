@@ -6,8 +6,13 @@ use assistant_text_thread::{
 };
 use gpui::{App, Context, Entity, EventEmitter, Subscription, Task};
 use language_model::Role;
+use regex::Regex;
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use url::Url;
 
 use crate::{
+    CompanionAsset, CompanionAssetDisposition, CompanionAssetSource, CompanionAttachment,
     CompanionCommandKind, CompanionConnectionMetadata, CompanionEvent, CompanionMessage,
     CompanionMessageRole, CompanionMessageStatus, CompanionRunStatus, CompanionSessionSummary,
     CompanionSnapshot, CompanionToolCall, CompanionToolCallStatus,
@@ -23,6 +28,7 @@ pub struct CompanionSessionMirror {
     connection: CompanionConnectionMetadata,
     source: Option<CompanionSessionSource>,
     snapshot: CompanionSnapshot,
+    assets: Vec<CompanionAsset>,
     _source_subscription: Option<Subscription>,
 }
 
@@ -30,11 +36,12 @@ impl EventEmitter<CompanionEvent> for CompanionSessionMirror {}
 
 impl CompanionSessionMirror {
     pub fn new(connection: CompanionConnectionMetadata) -> Self {
-        let snapshot = empty_snapshot(connection.clone());
+        let state = empty_state(connection.clone());
         Self {
             connection,
             source: None,
-            snapshot,
+            snapshot: state.snapshot,
+            assets: state.assets,
             _source_subscription: None,
         }
     }
@@ -47,6 +54,10 @@ impl CompanionSessionMirror {
         self.source.as_ref()
     }
 
+    pub fn assets(&self) -> &[CompanionAsset] {
+        &self.assets
+    }
+
     pub fn set_connection(
         &mut self,
         connection: CompanionConnectionMetadata,
@@ -57,7 +68,9 @@ impl CompanionSessionMirror {
         }
 
         self.connection = connection;
-        self.snapshot = self.build_snapshot(cx);
+        let state = self.build_state(cx);
+        self.snapshot = state.snapshot;
+        self.assets = state.assets;
         cx.emit(CompanionEvent::SnapshotReplaced {
             snapshot: self.snapshot.clone(),
         });
@@ -69,7 +82,9 @@ impl CompanionSessionMirror {
         self._source_subscription = source
             .as_ref()
             .map(|source| subscribe_to_source(source, cx));
-        self.snapshot = self.build_snapshot(cx);
+        let state = self.build_state(cx);
+        self.snapshot = state.snapshot;
+        self.assets = state.assets;
         cx.emit(CompanionEvent::SnapshotReplaced {
             snapshot: self.snapshot.clone(),
         });
@@ -151,14 +166,17 @@ impl CompanionSessionMirror {
     }
 
     fn refresh_from_source(&mut self, cx: &mut Context<Self>) {
-        let new_snapshot = self.build_snapshot(cx);
+        let new_state = self.build_state(cx);
+        let new_snapshot = new_state.snapshot;
 
         if self.snapshot.session != new_snapshot.session
             || self.snapshot.connection != new_snapshot.connection
             || self.snapshot.available_commands != new_snapshot.available_commands
             || self.snapshot.protocol_version != new_snapshot.protocol_version
+            || self.assets != new_state.assets
         {
             self.snapshot = new_snapshot;
+            self.assets = new_state.assets;
             cx.emit(CompanionEvent::SnapshotReplaced {
                 snapshot: self.snapshot.clone(),
             });
@@ -188,23 +206,29 @@ impl CompanionSessionMirror {
         }
 
         self.snapshot = new_snapshot;
+        self.assets = new_state.assets;
         cx.notify();
     }
 
-    fn build_snapshot(&self, cx: &App) -> CompanionSnapshot {
+    fn build_state(&self, cx: &App) -> CompanionMirrorState {
         let Some(source) = &self.source else {
-            return empty_snapshot(self.connection.clone());
+            return empty_state(self.connection.clone());
         };
 
         match source {
             CompanionSessionSource::AcpThread(thread) => {
-                snapshot_for_acp_thread(thread.read(cx), self.connection.clone(), cx)
+                state_for_acp_thread(thread.read(cx), self.connection.clone(), cx)
             }
             CompanionSessionSource::TextThread(thread) => {
-                snapshot_for_text_thread(thread.read(cx), self.connection.clone(), cx)
+                state_for_text_thread(thread.read(cx), self.connection.clone(), cx)
             }
         }
     }
+}
+
+struct CompanionMirrorState {
+    snapshot: CompanionSnapshot,
+    assets: Vec<CompanionAsset>,
 }
 
 fn subscribe_to_source(
@@ -242,37 +266,52 @@ fn subscribe_to_source(
     }
 }
 
-fn empty_snapshot(connection: CompanionConnectionMetadata) -> CompanionSnapshot {
-    CompanionSnapshot {
-        protocol_version: 1,
-        session: None,
-        connection,
-        messages: Vec::new(),
-        streaming_text: None,
-        tool_calls: Vec::new(),
-        run_status: CompanionRunStatus::Idle,
-        available_commands: Vec::new(),
+fn empty_state(connection: CompanionConnectionMetadata) -> CompanionMirrorState {
+    CompanionMirrorState {
+        snapshot: CompanionSnapshot {
+            protocol_version: 1,
+            session: None,
+            connection,
+            messages: Vec::new(),
+            streaming_text: None,
+            tool_calls: Vec::new(),
+            run_status: CompanionRunStatus::Idle,
+            available_commands: Vec::new(),
+        },
+        assets: Vec::new(),
     }
 }
 
-fn snapshot_for_acp_thread(
+fn state_for_acp_thread(
     thread: &AcpThread,
     connection: CompanionConnectionMetadata,
     cx: &App,
-) -> CompanionSnapshot {
-    let messages = thread
-        .entries()
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entry)| match entry {
-            AgentThreadEntry::UserMessage(message) => Some(CompanionMessage {
-                id: format!("user-{index}"),
-                role: CompanionMessageRole::User,
-                status: CompanionMessageStatus::Done,
-                text: message.content.to_markdown(cx).to_string(),
-            }),
+) -> CompanionMirrorState {
+    let mut messages = Vec::new();
+    let mut assets = Vec::new();
+
+    for (index, entry) in thread.entries().iter().enumerate() {
+        match entry {
+            AgentThreadEntry::UserMessage(message) => {
+                let message_id = format!("user-{index}");
+                let extracted = companion_content_from_acp_blocks(
+                    &message.chunks,
+                    message_id.as_str(),
+                    ResourceBlockFallback::Uri,
+                );
+                assets.extend(extracted.assets);
+                messages.push(CompanionMessage {
+                    id: message_id,
+                    role: CompanionMessageRole::User,
+                    status: CompanionMessageStatus::Done,
+                    text: extracted.text,
+                    attachments: extracted.attachments,
+                });
+            }
             AgentThreadEntry::AssistantMessage(message) => {
-                let text = assistant_message_text(message, cx);
+                let message_id = format!("assistant-{index}");
+                let extracted =
+                    companion_content_from_assistant_message(message, message_id.as_str(), cx);
                 let status = if thread.status() == ThreadStatus::Generating
                     && index + 1 == thread.entries().len()
                 {
@@ -280,16 +319,18 @@ fn snapshot_for_acp_thread(
                 } else {
                     CompanionMessageStatus::Done
                 };
-                Some(CompanionMessage {
-                    id: format!("assistant-{index}"),
+                assets.extend(extracted.assets);
+                messages.push(CompanionMessage {
+                    id: message_id,
                     role: CompanionMessageRole::Assistant,
                     status,
-                    text,
-                })
+                    text: extracted.text,
+                    attachments: extracted.attachments,
+                });
             }
-            AgentThreadEntry::ToolCall(_) => None,
-        })
-        .collect::<Vec<_>>();
+            AgentThreadEntry::ToolCall(_) => {}
+        }
+    }
 
     let tool_calls = thread
         .entries()
@@ -317,26 +358,29 @@ fn snapshot_for_acp_thread(
         None
     };
 
-    CompanionSnapshot {
-        protocol_version: 1,
-        session: Some(CompanionSessionSummary {
-            id: thread.session_id().to_string(),
-            title: thread.title().to_string(),
-        }),
-        connection,
-        messages,
-        streaming_text,
-        tool_calls,
-        run_status: map_acp_run_status(thread),
-        available_commands: available_commands_for_acp_thread(thread),
+    CompanionMirrorState {
+        snapshot: CompanionSnapshot {
+            protocol_version: 1,
+            session: Some(CompanionSessionSummary {
+                id: thread.session_id().to_string(),
+                title: thread.title().to_string(),
+            }),
+            connection,
+            messages,
+            streaming_text,
+            tool_calls,
+            run_status: map_acp_run_status(thread),
+            available_commands: available_commands_for_acp_thread(thread),
+        },
+        assets,
     }
 }
 
-fn snapshot_for_text_thread(
+fn state_for_text_thread(
     thread: &TextThread,
     connection: CompanionConnectionMetadata,
     cx: &App,
-) -> CompanionSnapshot {
+) -> CompanionMirrorState {
     let buffer = thread.buffer().read(cx);
     let messages = thread
         .messages(cx)
@@ -348,23 +392,27 @@ fn snapshot_for_text_thread(
             text: buffer
                 .text_for_range(message.offset_range.clone())
                 .collect(),
+            attachments: Vec::new(),
         })
         .collect::<Vec<_>>();
 
     let streaming_text = streaming_text_for_messages(&messages);
 
-    CompanionSnapshot {
-        protocol_version: 1,
-        session: Some(CompanionSessionSummary {
-            id: thread.id().to_proto(),
-            title: thread.summary().or_default().to_string(),
-        }),
-        connection,
-        messages,
-        streaming_text,
-        tool_calls: Vec::new(),
-        run_status: map_text_run_status(thread, cx),
-        available_commands: available_commands_for_text_thread(thread, cx),
+    CompanionMirrorState {
+        snapshot: CompanionSnapshot {
+            protocol_version: 1,
+            session: Some(CompanionSessionSummary {
+                id: thread.id().to_proto(),
+                title: thread.summary().or_default().to_string(),
+            }),
+            connection,
+            messages,
+            streaming_text,
+            tool_calls: Vec::new(),
+            run_status: map_text_run_status(thread, cx),
+            available_commands: available_commands_for_text_thread(thread, cx),
+        },
+        assets: Vec::new(),
     }
 }
 
@@ -476,20 +524,519 @@ fn available_commands_for_acp_thread(thread: &AcpThread) -> Vec<CompanionCommand
     commands
 }
 
-fn assistant_message_text(message: &acp_thread::AssistantMessage, cx: &App) -> String {
-    let mut text = String::new();
-    for (index, chunk) in message.chunks.iter().enumerate() {
-        if index > 0 {
-            text.push_str("\n\n");
+#[derive(Default)]
+struct CompanionExtractedContent {
+    text_parts: Vec<String>,
+    attachments: Vec<CompanionAttachment>,
+    assets: Vec<CompanionAsset>,
+}
+
+impl CompanionExtractedContent {
+    fn push_text(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if !text.trim().is_empty() {
+            self.text_parts.push(text);
         }
-        match chunk {
+    }
+
+    fn finish(
+        mut self,
+        message_id: &str,
+        attachment_index: &mut usize,
+    ) -> CompanionFinishedContent {
+        let text = normalize_message_text(self.text_parts.join("\n\n"));
+        let fallback = extract_local_markdown_attachments(&text, message_id, attachment_index);
+        self.attachments.extend(fallback.attachments);
+        self.assets.extend(fallback.assets);
+
+        CompanionFinishedContent {
+            text: fallback.text,
+            attachments: self.attachments,
+            assets: self.assets,
+        }
+    }
+}
+
+struct CompanionFinishedContent {
+    text: String,
+    attachments: Vec<CompanionAttachment>,
+    assets: Vec<CompanionAsset>,
+}
+
+fn companion_content_from_acp_blocks(
+    blocks: &[acp::ContentBlock],
+    message_id: &str,
+    resource_fallback: ResourceBlockFallback,
+) -> CompanionFinishedContent {
+    let mut content = CompanionExtractedContent::default();
+    let mut attachment_index = 0;
+
+    for block in blocks {
+        match block {
+            acp::ContentBlock::Text(text_content) => content.push_text(text_content.text.clone()),
+            acp::ContentBlock::Image(image_content) => {
+                if let Some((attachment, asset)) =
+                    image_attachment_from_acp(image_content, message_id, attachment_index)
+                {
+                    content.attachments.push(attachment);
+                    content.assets.push(asset);
+                    attachment_index += 1;
+                }
+            }
+            acp::ContentBlock::ResourceLink(resource_link) => {
+                append_resource_link_content(
+                    &mut content,
+                    &resource_link.name,
+                    &resource_link.uri,
+                    resource_link.mime_type.as_deref(),
+                    message_id,
+                    &mut attachment_index,
+                );
+            }
+            acp::ContentBlock::Resource(acp::EmbeddedResource {
+                resource: acp::EmbeddedResourceResource::TextResourceContents(resource_contents),
+                ..
+            }) => {
+                append_resource_link_content(
+                    &mut content,
+                    attachment_name_for_uri(&resource_contents.uri).as_str(),
+                    &resource_contents.uri,
+                    resource_contents.mime_type.as_deref(),
+                    message_id,
+                    &mut attachment_index,
+                );
+                let _ = resource_fallback;
+            }
+            acp::ContentBlock::Resource(acp::EmbeddedResource {
+                resource: acp::EmbeddedResourceResource::BlobResourceContents(resource_contents),
+                ..
+            }) => {
+                if let Some((attachment, asset)) =
+                    blob_attachment_from_acp(resource_contents, message_id, attachment_index)
+                {
+                    content.attachments.push(attachment);
+                    content.assets.push(asset);
+                    attachment_index += 1;
+                } else {
+                    content.push_text(resource_contents.uri.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    content.finish(message_id, &mut attachment_index)
+}
+
+fn companion_content_from_assistant_message(
+    message: &acp_thread::AssistantMessage,
+    message_id: &str,
+    cx: &App,
+) -> CompanionFinishedContent {
+    let mut content = CompanionExtractedContent::default();
+    let mut attachment_index = 0;
+
+    for chunk in &message.chunks {
+        let block = match chunk {
             acp_thread::AssistantMessageChunk::Message { block }
-            | acp_thread::AssistantMessageChunk::Thought { block } => {
-                text.push_str(block.to_markdown(cx));
+            | acp_thread::AssistantMessageChunk::Thought { block } => block,
+        };
+
+        match block {
+            acp_thread::ContentBlock::Empty => {}
+            acp_thread::ContentBlock::Markdown { markdown } => {
+                content.push_text(markdown.read(cx).source().to_string());
+            }
+            acp_thread::ContentBlock::ResourceLink { resource_link } => {
+                append_resource_link_content(
+                    &mut content,
+                    &resource_link.name,
+                    &resource_link.uri,
+                    resource_link.mime_type.as_deref(),
+                    message_id,
+                    &mut attachment_index,
+                );
+            }
+            acp_thread::ContentBlock::Image { image } => {
+                let (attachment, asset) =
+                    image_attachment_from_rendered(image, message_id, attachment_index);
+                content.attachments.push(attachment);
+                content.assets.push(asset);
+                attachment_index += 1;
             }
         }
     }
-    text
+
+    content.finish(message_id, &mut attachment_index)
+}
+
+#[derive(Clone, Copy)]
+enum ResourceBlockFallback {
+    Uri,
+}
+
+fn append_resource_link_content(
+    content: &mut CompanionExtractedContent,
+    preferred_name: &str,
+    uri: &str,
+    mime_type: Option<&str>,
+    message_id: &str,
+    attachment_index: &mut usize,
+) {
+    if let Some(path) = local_file_path_from_uri(uri) {
+        let (attachment, asset) = file_attachment_from_local_path(
+            preferred_name,
+            path,
+            mime_type,
+            message_id,
+            *attachment_index,
+        );
+        content.attachments.push(attachment);
+        content.assets.push(asset);
+        *attachment_index += 1;
+        return;
+    }
+
+    content.attachments.push(CompanionAttachment::Link {
+        id: attachment_id(message_id, *attachment_index),
+        name: attachment_display_name(preferred_name, uri),
+        url: uri.to_string(),
+    });
+    *attachment_index += 1;
+}
+
+fn image_attachment_from_acp(
+    image_content: &acp::ImageContent,
+    message_id: &str,
+    attachment_index: usize,
+) -> Option<(CompanionAttachment, CompanionAsset)> {
+    use base64::Engine as _;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image_content.data.as_bytes())
+        .ok()?;
+    let asset_id = asset_id(message_id, attachment_index);
+    let name = image_content
+        .uri
+        .as_deref()
+        .map(attachment_name_for_uri)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| default_name_for_mime_type(&image_content.mime_type));
+
+    Some((
+        CompanionAttachment::Image {
+            id: attachment_id(message_id, attachment_index),
+            name: name.clone(),
+            mime_type: image_content.mime_type.clone(),
+            asset_id: asset_id.clone(),
+        },
+        CompanionAsset {
+            id: asset_id,
+            name,
+            mime_type: image_content.mime_type.clone(),
+            disposition: CompanionAssetDisposition::Inline,
+            source: CompanionAssetSource::Bytes(bytes),
+        },
+    ))
+}
+
+fn image_attachment_from_rendered(
+    image: &gpui::Image,
+    message_id: &str,
+    attachment_index: usize,
+) -> (CompanionAttachment, CompanionAsset) {
+    let mime_type = image.format().mime_type().to_string();
+    let name = default_name_for_mime_type(&mime_type);
+    let asset_id = asset_id(message_id, attachment_index);
+
+    (
+        CompanionAttachment::Image {
+            id: attachment_id(message_id, attachment_index),
+            name: name.clone(),
+            mime_type: mime_type.clone(),
+            asset_id: asset_id.clone(),
+        },
+        CompanionAsset {
+            id: asset_id,
+            name,
+            mime_type,
+            disposition: CompanionAssetDisposition::Inline,
+            source: CompanionAssetSource::Bytes(image.bytes().to_vec()),
+        },
+    )
+}
+
+fn blob_attachment_from_acp(
+    resource_contents: &acp::BlobResourceContents,
+    message_id: &str,
+    attachment_index: usize,
+) -> Option<(CompanionAttachment, CompanionAsset)> {
+    use base64::Engine as _;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(resource_contents.blob.as_bytes())
+        .ok()?;
+    let mime_type = resource_contents.mime_type.clone().unwrap_or_else(|| {
+        mime_type_for_uri(&resource_contents.uri).unwrap_or_else(default_binary_mime_type)
+    });
+    let name = attachment_name_for_uri(&resource_contents.uri);
+    let asset_id = asset_id(message_id, attachment_index);
+
+    let attachment = if is_inline_image_mime_type(&mime_type) {
+        CompanionAttachment::Image {
+            id: attachment_id(message_id, attachment_index),
+            name: name.clone(),
+            mime_type: mime_type.clone(),
+            asset_id: asset_id.clone(),
+        }
+    } else {
+        CompanionAttachment::File {
+            id: attachment_id(message_id, attachment_index),
+            name: name.clone(),
+            mime_type: Some(mime_type.clone()),
+            asset_id: asset_id.clone(),
+        }
+    };
+    let disposition = if is_inline_image_mime_type(&mime_type) {
+        CompanionAssetDisposition::Inline
+    } else {
+        CompanionAssetDisposition::Attachment
+    };
+
+    Some((
+        attachment,
+        CompanionAsset {
+            id: asset_id,
+            name,
+            mime_type,
+            disposition,
+            source: CompanionAssetSource::Bytes(bytes),
+        },
+    ))
+}
+
+fn file_attachment_from_local_path(
+    preferred_name: &str,
+    path: PathBuf,
+    mime_type: Option<&str>,
+    message_id: &str,
+    attachment_index: usize,
+) -> (CompanionAttachment, CompanionAsset) {
+    let asset_id = asset_id(message_id, attachment_index);
+    let effective_mime_type = mime_type
+        .map(ToString::to_string)
+        .or_else(|| mime_type_for_path(&path));
+    let name = if preferred_name.trim().is_empty() {
+        file_name_for_path(&path)
+    } else {
+        preferred_name.to_string()
+    };
+
+    if let Some(mime_type) = effective_mime_type
+        .clone()
+        .filter(|mime| is_inline_image_mime_type(mime))
+    {
+        (
+            CompanionAttachment::Image {
+                id: attachment_id(message_id, attachment_index),
+                name: name.clone(),
+                mime_type: mime_type.clone(),
+                asset_id: asset_id.clone(),
+            },
+            CompanionAsset {
+                id: asset_id,
+                name,
+                mime_type,
+                disposition: CompanionAssetDisposition::Inline,
+                source: CompanionAssetSource::File(path),
+            },
+        )
+    } else {
+        (
+            CompanionAttachment::File {
+                id: attachment_id(message_id, attachment_index),
+                name: name.clone(),
+                mime_type: effective_mime_type.clone(),
+                asset_id: asset_id.clone(),
+            },
+            CompanionAsset {
+                id: asset_id,
+                name,
+                mime_type: effective_mime_type.unwrap_or_else(default_binary_mime_type),
+                disposition: CompanionAssetDisposition::Attachment,
+                source: CompanionAssetSource::File(path),
+            },
+        )
+    }
+}
+
+fn local_file_path_from_uri(uri: &str) -> Option<PathBuf> {
+    let url = Url::parse(uri).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    url.to_file_path().ok()
+}
+
+fn local_file_path_from_link_target(target: &str) -> Option<PathBuf> {
+    let trimmed = target.trim().trim_start_matches('<').trim_end_matches('>');
+    local_file_path_from_uri(trimmed).or_else(|| {
+        let path = PathBuf::from(trimmed);
+        path.is_absolute().then_some(path)
+    })
+}
+
+fn attachment_id(message_id: &str, attachment_index: usize) -> String {
+    format!("{message_id}-attachment-{attachment_index}")
+}
+
+fn asset_id(message_id: &str, attachment_index: usize) -> String {
+    format!("{message_id}-asset-{attachment_index}")
+}
+
+fn attachment_display_name(preferred_name: &str, uri: &str) -> String {
+    if !preferred_name.trim().is_empty() {
+        return preferred_name.to_string();
+    }
+    attachment_name_for_uri(uri)
+}
+
+fn attachment_name_for_uri(uri: &str) -> String {
+    if let Some(path) = local_file_path_from_uri(uri) {
+        return file_name_for_path(&path);
+    }
+
+    if let Ok(url) = Url::parse(uri) {
+        if let Some(name) = url
+            .path_segments()
+            .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+        {
+            return name.to_string();
+        }
+        if let Some(host) = url.host_str() {
+            return host.to_string();
+        }
+    }
+
+    "attachment".into()
+}
+
+fn file_name_for_path(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("attachment")
+        .to_string()
+}
+
+fn mime_type_for_uri(uri: &str) -> Option<String> {
+    local_file_path_from_uri(uri).and_then(|path| mime_type_for_path(&path))
+}
+
+fn mime_type_for_path(path: &Path) -> Option<String> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(
+        match extension.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "svg" => "image/svg+xml",
+            "bmp" => "image/bmp",
+            "tif" | "tiff" => "image/tiff",
+            "ico" => "image/x-icon",
+            "pdf" => "application/pdf",
+            "json" => "application/json",
+            "md" => "text/markdown",
+            "txt" | "log" | "rs" | "js" | "ts" | "tsx" | "jsx" | "py" | "toml" | "yaml" | "yml" => {
+                "text/plain"
+            }
+            _ => return None,
+        }
+        .to_string(),
+    )
+}
+
+fn default_name_for_mime_type(mime_type: &str) -> String {
+    let extension = match mime_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        "image/bmp" => "bmp",
+        "image/tiff" => "tiff",
+        _ => "bin",
+    };
+    format!("attachment.{extension}")
+}
+
+fn default_binary_mime_type() -> String {
+    "application/octet-stream".into()
+}
+
+fn is_inline_image_mime_type(mime_type: &str) -> bool {
+    mime_type.starts_with("image/")
+}
+
+static LOCAL_MARKDOWN_ATTACHMENT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?P<image>!)?\[(?P<label>[^\]]*)\]\((?P<target>[^)\s]+)\)"#)
+        .expect("valid markdown attachment regex")
+});
+
+fn extract_local_markdown_attachments(
+    text: &str,
+    message_id: &str,
+    attachment_index: &mut usize,
+) -> CompanionFinishedContent {
+    let mut cleaned_text = String::with_capacity(text.len());
+    let mut attachments = Vec::new();
+    let mut assets = Vec::new();
+    let mut last_match_end = 0;
+
+    for capture in LOCAL_MARKDOWN_ATTACHMENT_REGEX.captures_iter(text) {
+        let Some(matched) = capture.get(0) else {
+            continue;
+        };
+        cleaned_text.push_str(&text[last_match_end..matched.start()]);
+
+        let label = capture
+            .name("label")
+            .map(|value| value.as_str())
+            .unwrap_or_default();
+        let target = capture
+            .name("target")
+            .map(|value| value.as_str())
+            .unwrap_or_default();
+
+        if let Some(path) = local_file_path_from_link_target(target) {
+            let (attachment, asset) =
+                file_attachment_from_local_path(label, path, None, message_id, *attachment_index);
+            attachments.push(attachment);
+            assets.push(asset);
+            *attachment_index += 1;
+        } else {
+            cleaned_text.push_str(matched.as_str());
+        }
+
+        last_match_end = matched.end();
+    }
+
+    cleaned_text.push_str(&text[last_match_end..]);
+
+    CompanionFinishedContent {
+        text: normalize_message_text(cleaned_text),
+        attachments,
+        assets,
+    }
+}
+
+fn normalize_message_text(text: String) -> String {
+    let mut normalized = text.trim().to_string();
+    while normalized.contains("\n\n\n") {
+        normalized = normalized.replace("\n\n\n", "\n\n");
+    }
+    normalized
 }
 
 fn tool_call_output_preview(tool_call: &acp_thread::ToolCall, cx: &App) -> Option<String> {
@@ -525,12 +1072,13 @@ mod tests {
     use assistant_text_thread::TextThread;
 
     use super::{
-        CompanionSessionMirror, CompanionSessionSource, empty_snapshot,
+        CompanionSessionMirror, CompanionSessionSource, ResourceBlockFallback,
+        companion_content_from_acp_blocks, empty_state, extract_local_markdown_attachments,
         streaming_text_for_messages, truncate_preview,
     };
     use crate::{
-        CompanionConnectionMetadata, CompanionEvent, CompanionMessage, CompanionMessageRole,
-        CompanionMessageStatus, CompanionRunStatus,
+        CompanionAttachment, CompanionConnectionMetadata, CompanionEvent, CompanionMessage,
+        CompanionMessageRole, CompanionMessageStatus, CompanionRunStatus,
     };
 
     #[gpui::test]
@@ -591,11 +1139,12 @@ mod tests {
 
     #[test]
     fn empty_snapshot_has_no_commands() {
-        let snapshot = empty_snapshot(CompanionConnectionMetadata {
+        let snapshot = empty_state(CompanionConnectionMetadata {
             token_id: "token-1".into(),
             issued_at_unix_ms: None,
             expires_at_unix_ms: None,
-        });
+        })
+        .snapshot;
 
         assert!(snapshot.messages.is_empty());
         assert!(snapshot.tool_calls.is_empty());
@@ -610,12 +1159,14 @@ mod tests {
                 role: CompanionMessageRole::Assistant,
                 status: CompanionMessageStatus::Done,
                 text: "previous reply".into(),
+                attachments: Vec::new(),
             },
             CompanionMessage {
                 id: "user-2".into(),
                 role: CompanionMessageRole::User,
                 status: CompanionMessageStatus::Done,
                 text: "new question".into(),
+                attachments: Vec::new(),
             },
         ];
 
@@ -629,11 +1180,84 @@ mod tests {
             role: CompanionMessageRole::Assistant,
             status: CompanionMessageStatus::Pending,
             text: "streaming reply".into(),
+            attachments: Vec::new(),
         }];
 
         assert_eq!(
             streaming_text_for_messages(&messages),
             Some("streaming reply".into())
         );
+    }
+
+    #[test]
+    fn acp_image_blocks_become_inline_image_attachments() {
+        let extracted = companion_content_from_acp_blocks(
+            &[agent_client_protocol::ContentBlock::Image(
+                agent_client_protocol::ImageContent::new("AQID", "image/png"),
+            )],
+            "message-1",
+            ResourceBlockFallback::Uri,
+        );
+
+        assert!(extracted.text.is_empty());
+        assert!(matches!(
+            extracted.attachments.first(),
+            Some(CompanionAttachment::Image { .. })
+        ));
+        assert_eq!(extracted.assets.len(), 1);
+    }
+
+    #[test]
+    fn local_file_resource_links_become_downloadable_file_attachments() {
+        let extracted = companion_content_from_acp_blocks(
+            &[agent_client_protocol::ContentBlock::ResourceLink(
+                agent_client_protocol::ResourceLink::new("report.txt", "file:///tmp/report.txt"),
+            )],
+            "message-2",
+            ResourceBlockFallback::Uri,
+        );
+
+        assert!(extracted.text.is_empty());
+        assert!(matches!(
+            extracted.attachments.first(),
+            Some(CompanionAttachment::File { .. })
+        ));
+        assert_eq!(extracted.assets.len(), 1);
+    }
+
+    #[test]
+    fn markdown_image_paths_become_inline_attachments() {
+        let mut attachment_index = 0;
+        let extracted = extract_local_markdown_attachments(
+            "Preview:\n\n![calculator](/tmp/calculator-window.png)",
+            "message-3",
+            &mut attachment_index,
+        );
+
+        assert_eq!(extracted.text, "Preview:");
+        assert!(matches!(
+            extracted.attachments.first(),
+            Some(CompanionAttachment::Image { .. })
+        ));
+        assert_eq!(extracted.assets.len(), 1);
+        assert_eq!(attachment_index, 1);
+    }
+
+    #[test]
+    fn markdown_file_links_become_downloadable_attachments() {
+        let mut attachment_index = 0;
+        let extracted = extract_local_markdown_attachments(
+            "Artifact: [report.txt](/tmp/report.txt)",
+            "message-4",
+            &mut attachment_index,
+        );
+
+        assert_eq!(extracted.text, "Artifact:");
+        assert!(matches!(
+            extracted.attachments.first(),
+            Some(CompanionAttachment::File { .. })
+        ));
+        assert_eq!(extracted.assets.len(), 1);
+        assert_eq!(attachment_index, 1);
     }
 }

@@ -33,6 +33,31 @@ pub struct CompanionMessage {
     pub role: CompanionMessageRole,
     pub status: CompanionMessageStatus,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<CompanionAttachment>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompanionAttachment {
+    Image {
+        id: String,
+        name: String,
+        mime_type: String,
+        asset_id: String,
+    },
+    File {
+        id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+        asset_id: String,
+    },
+    Link {
+        id: String,
+        name: String,
+        url: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -117,9 +142,10 @@ pub enum CompanionCommandKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata, CompanionEvent,
-        CompanionMessage, CompanionMessageRole, CompanionMessageStatus, CompanionRunStatus,
-        CompanionSessionSummary, CompanionSnapshot, CompanionToolCall, CompanionToolCallStatus,
+        CompanionAttachment, CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata,
+        CompanionEvent, CompanionMessage, CompanionMessageRole, CompanionMessageStatus,
+        CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot, CompanionToolCall,
+        CompanionToolCallStatus,
     };
 
     #[test]
@@ -141,12 +167,24 @@ mod tests {
                     role: CompanionMessageRole::User,
                     status: CompanionMessageStatus::Done,
                     text: "Run the test suite".into(),
+                    attachments: vec![CompanionAttachment::File {
+                        id: "attachment-1".into(),
+                        name: "test-output.txt".into(),
+                        mime_type: Some("text/plain".into()),
+                        asset_id: "asset-1".into(),
+                    }],
                 },
                 CompanionMessage {
                     id: "message-2".into(),
                     role: CompanionMessageRole::Assistant,
                     status: CompanionMessageStatus::Pending,
                     text: "Running tests now".into(),
+                    attachments: vec![CompanionAttachment::Image {
+                        id: "attachment-2".into(),
+                        name: "progress.png".into(),
+                        mime_type: "image/png".into(),
+                        asset_id: "asset-2".into(),
+                    }],
                 },
             ],
             streaming_text: Some("cargo test -p agent_ui".into()),
@@ -170,6 +208,7 @@ mod tests {
         assert_eq!(json["protocol_version"], 1);
         assert_eq!(json["session"]["id"], "thread-1");
         assert_eq!(json["messages"][1]["role"], "assistant");
+        assert_eq!(json["messages"][1]["attachments"][0]["type"], "image");
         assert_eq!(json["tool_calls"][0]["status"], "running");
         assert_eq!(json["run_status"], "running_tools");
 

@@ -1,27 +1,36 @@
 use anyhow::{Context as _, Result};
 use axum::{
     Json, Router,
+    body::Body,
     extract::{
-        Query, State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{
+        StatusCode,
+        header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE},
+    },
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 use tokio::{
+    fs,
     net::TcpListener,
     sync::{broadcast, watch},
     task::JoinHandle,
 };
 
 use crate::static_client;
-use crate::{CompanionCommand, CompanionEvent, CompanionSnapshot};
+use crate::{
+    CompanionAsset, CompanionAssetDisposition, CompanionAssetSource, CompanionCommand,
+    CompanionEvent, CompanionSnapshot,
+};
 
 #[derive(Clone)]
 pub struct CompanionServerState {
@@ -29,6 +38,7 @@ pub struct CompanionServerState {
     snapshot_rx: watch::Receiver<CompanionSnapshot>,
     event_tx: broadcast::Sender<CompanionEvent>,
     command_tx: UnboundedSender<CompanionCommand>,
+    assets: Arc<RwLock<HashMap<String, CompanionAsset>>>,
     client_html: Arc<str>,
 }
 
@@ -40,6 +50,7 @@ pub struct CompanionServerStart {
 pub struct CompanionServerHandle {
     snapshot_tx: watch::Sender<CompanionSnapshot>,
     event_tx: broadcast::Sender<CompanionEvent>,
+    assets: Arc<RwLock<HashMap<String, CompanionAsset>>>,
     shutdown_tx: watch::Sender<bool>,
     join_handle: JoinHandle<Result<()>>,
     access_info: crate::CompanionAccessInfo,
@@ -58,6 +69,15 @@ impl CompanionServerHandle {
         let _ = self.event_tx.send(event);
     }
 
+    pub fn replace_assets(&self, assets: Vec<CompanionAsset>) {
+        if let Ok(mut registered_assets) = self.assets.write() {
+            *registered_assets = assets
+                .into_iter()
+                .map(|asset| (asset.id.clone(), asset))
+                .collect();
+        }
+    }
+
     pub async fn stop(self) -> Result<()> {
         let _ = self.shutdown_tx.send(true);
         self.join_handle
@@ -73,6 +93,7 @@ struct CompanionAuthQuery {
 
 pub async fn start_server(
     initial_snapshot: CompanionSnapshot,
+    initial_assets: Vec<CompanionAsset>,
     token_id: String,
     client_html: String,
 ) -> Result<CompanionServerStart> {
@@ -87,12 +108,19 @@ pub async fn start_server(
     let (event_tx, _) = broadcast::channel(64);
     let (command_tx, command_rx) = mpsc::unbounded();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let assets = Arc::new(RwLock::new(
+        initial_assets
+            .into_iter()
+            .map(|asset| (asset.id.clone(), asset))
+            .collect(),
+    ));
 
     let app_state = CompanionServerState {
         token_id: Arc::from(token_id.clone()),
         snapshot_rx,
         event_tx: event_tx.clone(),
         command_tx,
+        assets: assets.clone(),
         client_html: Arc::from(client_html),
     };
 
@@ -128,6 +156,7 @@ pub async fn start_server(
         handle: CompanionServerHandle {
             snapshot_tx,
             event_tx,
+            assets,
             shutdown_tx,
             join_handle,
             access_info,
@@ -145,6 +174,7 @@ fn router(state: CompanionServerState) -> Router {
         .route("/companion", get(companion_client))
         .route("/companion/snapshot", get(companion_snapshot))
         .route("/companion/events", get(companion_events))
+        .route("/companion/assets/:asset_id", get(companion_asset))
         .route("/companion/command", post(companion_command))
         .with_state(state)
 }
@@ -187,6 +217,47 @@ async fn companion_events(
     Ok(ws
         .on_upgrade(move |socket| stream_events(socket, state))
         .into_response())
+}
+
+async fn companion_asset(
+    State(state): State<CompanionServerState>,
+    Path(asset_id): Path<String>,
+    Query(query): Query<CompanionAuthQuery>,
+) -> Result<Response, StatusCode> {
+    authorize(&state, &query)?;
+
+    let asset = state
+        .assets
+        .read()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .get(&asset_id)
+        .cloned()
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let body = match &asset.source {
+        CompanionAssetSource::Bytes(bytes) => bytes.clone(),
+        CompanionAssetSource::File(path) => {
+            fs::read(path).await.map_err(|_| StatusCode::NOT_FOUND)?
+        }
+    };
+
+    let content_disposition = match asset.disposition {
+        CompanionAssetDisposition::Inline => "inline",
+        CompanionAssetDisposition::Attachment => "attachment",
+    };
+    let filename = sanitize_filename(&asset.name);
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, asset.mime_type)
+        .header(CACHE_CONTROL, "no-store")
+        .header(
+            CONTENT_DISPOSITION,
+            format!("{content_disposition}; filename=\"{filename}\""),
+        )
+        .body(Body::from(body))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(response.into_response())
 }
 
 async fn stream_events(mut socket: WebSocket, state: CompanionServerState) {
@@ -234,11 +305,29 @@ fn discover_lan_host() -> String {
     }
 }
 
+fn sanitize_filename(name: &str) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return "attachment".into();
+    }
+
+    trimmed
+        .chars()
+        .map(|character| match character {
+            '"' | '\\' | '/' | '\n' | '\r' | '\t' => '_',
+            other => other,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use axum::http::{Method, Request};
+    use axum::http::{
+        Method, Request,
+        header::{CONTENT_DISPOSITION, CONTENT_TYPE},
+    };
     use axum::{body::Body, http::StatusCode};
     use futures::StreamExt as _;
     use futures::channel::mpsc;
@@ -248,7 +337,8 @@ mod tests {
 
     use super::{CompanionServerState, default_client_html, router};
     use crate::{
-        CompanionCommand, CompanionConnectionMetadata, CompanionRunStatus, CompanionSnapshot,
+        CompanionAsset, CompanionAssetDisposition, CompanionAssetSource, CompanionCommand,
+        CompanionConnectionMetadata, CompanionRunStatus, CompanionSnapshot,
     };
 
     fn test_state() -> (
@@ -279,6 +369,7 @@ mod tests {
                 snapshot_rx,
                 event_tx,
                 command_tx,
+                assets: Arc::default(),
                 client_html: Arc::from(default_client_html().to_string()),
             },
             command_rx,
@@ -322,6 +413,7 @@ mod tests {
         assert!(html.contains("Agent Companion"));
         assert!(html.contains("Live view of the active Zed thread."));
         assert!(html.contains("id=\"action-button\""));
+        assert!(html.contains("message-attachments"));
     }
 
     #[tokio::test]
@@ -374,5 +466,111 @@ mod tests {
                 text: "hello from mobile".into(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn asset_route_requires_token() {
+        let (state, _) = test_state();
+        if let Ok(mut assets) = state.assets.write() {
+            assets.insert(
+                "asset-1".into(),
+                CompanionAsset {
+                    id: "asset-1".into(),
+                    name: "preview.png".into(),
+                    mime_type: "image/png".into(),
+                    disposition: CompanionAssetDisposition::Inline,
+                    source: CompanionAssetSource::Bytes(vec![1, 2, 3]),
+                },
+            );
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/companion/assets/asset-1?token=wrong")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn asset_route_serves_inline_image_bytes() {
+        let (state, _) = test_state();
+        if let Ok(mut assets) = state.assets.write() {
+            assets.insert(
+                "asset-1".into(),
+                CompanionAsset {
+                    id: "asset-1".into(),
+                    name: "preview.png".into(),
+                    mime_type: "image/png".into(),
+                    disposition: CompanionAssetDisposition::Inline,
+                    source: CompanionAssetSource::Bytes(vec![1, 2, 3]),
+                },
+            );
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/companion/assets/asset-1?token=test-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "image/png");
+        assert_eq!(
+            response.headers()[CONTENT_DISPOSITION],
+            "inline; filename=\"preview.png\""
+        );
+        let body = to_bytes(response.into_body()).await.expect("body");
+        assert_eq!(body.as_ref(), &[1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn asset_route_serves_local_file_download() {
+        let (state, _) = test_state();
+        let path =
+            std::env::temp_dir().join(format!("agent-companion-asset-{}.txt", std::process::id()));
+        std::fs::write(&path, b"hello from file").expect("write temp file");
+
+        if let Ok(mut assets) = state.assets.write() {
+            assets.insert(
+                "asset-2".into(),
+                CompanionAsset {
+                    id: "asset-2".into(),
+                    name: "notes.txt".into(),
+                    mime_type: "text/plain".into(),
+                    disposition: CompanionAssetDisposition::Attachment,
+                    source: CompanionAssetSource::File(path.clone()),
+                },
+            );
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/companion/assets/asset-2?token=test-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "text/plain");
+        assert_eq!(
+            response.headers()[CONTENT_DISPOSITION],
+            "attachment; filename=\"notes.txt\""
+        );
+        let body = to_bytes(response.into_body()).await.expect("body");
+        assert_eq!(body.as_ref(), b"hello from file");
     }
 }

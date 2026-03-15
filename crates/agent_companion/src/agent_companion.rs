@@ -9,13 +9,17 @@ use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription, Task};
 use gpui_tokio::Tokio;
 use settings::{Settings as _, SettingsStore};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use uuid::Uuid;
 
 pub use protocol::{
-    CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata, CompanionEvent,
-    CompanionMessage, CompanionMessageRole, CompanionMessageStatus, CompanionRunStatus,
-    CompanionSessionSummary, CompanionSnapshot, CompanionToolCall, CompanionToolCallStatus,
+    CompanionAttachment, CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata,
+    CompanionEvent, CompanionMessage, CompanionMessageRole, CompanionMessageStatus,
+    CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot, CompanionToolCall,
+    CompanionToolCallStatus,
 };
 pub use server::{CompanionServerHandle, CompanionServerStart, CompanionServerState};
 pub use session_mirror::{CompanionSessionMirror, CompanionSessionSource};
@@ -45,6 +49,27 @@ pub enum CompanionServiceState {
 pub struct CompanionAccessInfo {
     pub url: String,
     pub token_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompanionAsset {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub disposition: CompanionAssetDisposition,
+    pub source: CompanionAssetSource,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompanionAssetDisposition {
+    Inline,
+    Attachment,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompanionAssetSource {
+    Bytes(Vec<u8>),
+    File(PathBuf),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -188,6 +213,7 @@ impl CompanionManager {
             .update(cx, |mirror, cx| mirror.set_connection(connection, cx));
 
         let initial_snapshot = self.mirror.read(cx).snapshot().clone();
+        let initial_assets = self.mirror.read(cx).assets().to_vec();
         self.status.state = CompanionServiceState::Starting;
         self.status.shared_session = initial_snapshot.session.clone();
         self.emit_status(cx);
@@ -196,6 +222,7 @@ impl CompanionManager {
             cx,
             server::start_server(
                 initial_snapshot,
+                initial_assets,
                 token_id,
                 server::default_client_html().to_string(),
             ),
@@ -343,6 +370,7 @@ impl CompanionManager {
 
         if let Some(server) = &self.server {
             server.publish_snapshot(mirror.read(cx).snapshot().clone());
+            server.replace_assets(mirror.read(cx).assets().to_vec());
             server.publish_event(event.clone());
         }
 

@@ -18,14 +18,17 @@ agent-client-protocol.workspace = true
 anyhow.workspace = true
 assistant_text_thread.workspace = true
 axum = { version = "0.6", features = ["json", "ws"] }
+base64.workspace = true
 futures.workspace = true
 gpui.workspace = true
 gpui_tokio.workspace = true
 language_model.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 settings.workspace = true
-tokio = { workspace = true, features = ["net", "sync"] }
+tokio = { workspace = true, features = ["fs", "net", "sync"] }
+url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
