@@ -17,6 +17,7 @@ use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use paths::data_dir;
 use std::{
     collections::HashMap,
+    io,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path as StdPath, PathBuf},
     sync::{Arc, RwLock},
@@ -306,9 +307,7 @@ async fn companion_asset(
 
     let body = match &asset.source {
         CompanionAssetSource::Bytes(bytes) => bytes.clone(),
-        CompanionAssetSource::File(path) => {
-            fs::read(path).await.map_err(|_| StatusCode::NOT_FOUND)?
-        }
+        CompanionAssetSource::File(path) => fs::read(path).await.map_err(asset_read_status_code)?,
     };
 
     let content_disposition = match asset.disposition {
@@ -328,6 +327,13 @@ async fn companion_asset(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(response.into_response())
+}
+
+fn asset_read_status_code(error: io::Error) -> StatusCode {
+    match error.kind() {
+        io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+        _ => StatusCode::FORBIDDEN,
+    }
 }
 
 async fn stream_events(mut socket: WebSocket, state: CompanionServerState) {
@@ -1045,5 +1051,73 @@ mod tests {
         );
         let body = to_bytes(response.into_body()).await.expect("body");
         assert_eq!(body.as_ref(), b"hello from file");
+    }
+
+    #[tokio::test]
+    async fn asset_route_returns_not_found_for_missing_local_file() {
+        let (state, _) = test_state();
+        let path = std::env::temp_dir().join(format!(
+            "agent-companion-missing-{}.txt",
+            std::process::id()
+        ));
+
+        if let Ok(mut assets) = state.assets.write() {
+            assets.insert(
+                "asset-missing".into(),
+                CompanionAsset {
+                    id: "asset-missing".into(),
+                    name: "missing.txt".into(),
+                    mime_type: "text/plain".into(),
+                    disposition: CompanionAssetDisposition::Attachment,
+                    source: CompanionAssetSource::File(path),
+                },
+            );
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/companion/assets/asset-missing?token=test-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn asset_route_returns_forbidden_for_unreadable_local_file() {
+        let (state, _) = test_state();
+        let path =
+            std::env::temp_dir().join(format!("agent-companion-directory-{}", std::process::id()));
+        std::fs::create_dir_all(&path).expect("create temp directory");
+
+        if let Ok(mut assets) = state.assets.write() {
+            assets.insert(
+                "asset-forbidden".into(),
+                CompanionAsset {
+                    id: "asset-forbidden".into(),
+                    name: "directory".into(),
+                    mime_type: "application/octet-stream".into(),
+                    disposition: CompanionAssetDisposition::Attachment,
+                    source: CompanionAssetSource::File(path.clone()),
+                },
+            );
+        }
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/companion/assets/asset-forbidden?token=test-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let _ = std::fs::remove_dir_all(&path);
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

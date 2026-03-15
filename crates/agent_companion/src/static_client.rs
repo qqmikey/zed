@@ -666,6 +666,27 @@ pub fn default_client_html() -> &'static str {
       object-fit: contain;
     }
 
+    .asset-unavailable {
+      display: grid;
+      gap: 6px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 181, 77, 0.24);
+      background: rgba(255, 181, 77, 0.08);
+      color: var(--text-soft);
+    }
+
+    .asset-unavailable-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: rgba(255, 219, 161, 0.98);
+    }
+
+    .asset-unavailable-copy {
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
     .message-body.markdown blockquote {
       padding-left: 12px;
       border-left: 3px solid rgba(255, 255, 255, 0.12);
@@ -1465,7 +1486,16 @@ pub fn default_client_html() -> &'static str {
 
       function bindTimelineMediaEvents() {
         elements.messages.querySelectorAll(".message-body img, .attachment-image img").forEach(image => {
+          if (image.dataset.assetEventsBound === "true") {
+            return;
+          }
+
+          image.dataset.assetEventsBound = "true";
+
           if (image.complete) {
+            if (image.naturalWidth === 0) {
+              handleAssetImageFailure(image);
+            }
             return;
           }
 
@@ -1474,7 +1504,118 @@ pub fn default_client_html() -> &'static str {
               scheduleScrollToBottom();
             }
           }, { once: true });
+
+          image.addEventListener("error", () => {
+            handleAssetImageFailure(image);
+          }, { once: true });
         });
+      }
+
+      function assetUnavailableMessage(status, fileName) {
+        if (status === 403) {
+          return {
+            title: `${fileName} is unavailable in Mobile Companion`,
+            copy: "Zed does not currently have system file access for this local file. Grant Full Disk Access in System Settings > Privacy & Security > Full Disk Access, then reload."
+          };
+        }
+
+        return {
+          title: `${fileName} is unavailable in Mobile Companion`,
+          copy: "The original local file is no longer available at that path."
+        };
+      }
+
+      function assetUnavailableNoticeNode(status, fileName) {
+        const message = assetUnavailableMessage(status, fileName);
+        const notice = document.createElement("div");
+        notice.className = "asset-unavailable";
+        notice.innerHTML = `
+          <div class="asset-unavailable-title">${escapeHtml(message.title)}</div>
+          <div class="asset-unavailable-copy">${escapeHtml(message.copy)}</div>
+        `;
+        return notice;
+      }
+
+      async function assetRequestStatus(url) {
+        try {
+          let response = await fetch(url, {
+            method: "HEAD",
+            cache: "no-store"
+          });
+          if (response.status === 405) {
+            response = await fetch(url, {
+              method: "GET",
+              cache: "no-store"
+            });
+          }
+          return response.status;
+        } catch (_error) {
+          return 404;
+        }
+      }
+
+      async function handleAssetImageFailure(image) {
+        const src = image.getAttribute("src");
+        if (!src) {
+          return;
+        }
+
+        const status = await assetRequestStatus(src);
+        const fileName = image.getAttribute("alt") || "This file";
+        const notice = assetUnavailableNoticeNode(status, fileName);
+        const imageCard = image.closest(".attachment-image");
+        if (imageCard) {
+          imageCard.replaceWith(notice);
+          return;
+        }
+
+        image.replaceWith(notice);
+      }
+
+      async function openAssetLink(anchor) {
+        const href = anchor.getAttribute("href");
+        if (!href) {
+          return;
+        }
+
+        const status = await assetRequestStatus(href);
+        if (status >= 200 && status < 300) {
+          if (anchor.hasAttribute("download")) {
+            const downloadLink = document.createElement("a");
+            downloadLink.href = href;
+            const downloadName = anchor.getAttribute("download");
+            if (downloadName) {
+              downloadLink.download = downloadName;
+            }
+            downloadLink.click();
+          } else {
+            window.open(href, "_blank", "noopener,noreferrer");
+          }
+          return;
+        }
+
+        const fileName =
+          anchor.getAttribute("download") ||
+          anchor.textContent.trim() ||
+          "This file";
+        const notice = assetUnavailableNoticeNode(status, fileName);
+        const attachmentCard = anchor.closest(".attachment-file, .attachment-link");
+        if (attachmentCard) {
+          const previousNotice = attachmentCard.querySelector(".asset-unavailable");
+          if (previousNotice) {
+            previousNotice.replaceWith(notice);
+          } else {
+            attachmentCard.appendChild(notice);
+          }
+          return;
+        }
+
+        const previousNotice = anchor.parentElement?.querySelector(":scope > .asset-unavailable");
+        if (previousNotice) {
+          previousNotice.replaceWith(notice);
+        } else {
+          anchor.insertAdjacentElement("afterend", notice);
+        }
       }
 
       function lastPendingAssistantIndex(entries) {
@@ -2149,6 +2290,13 @@ pub fn default_client_html() -> &'static str {
       });
 
       elements.messages.addEventListener("click", event => {
+        const assetLink = event.target.closest("a[href*=\"/companion/assets/\"]");
+        if (assetLink) {
+          event.preventDefault();
+          openAssetLink(assetLink);
+          return;
+        }
+
         const toggle = event.target.closest("[data-tool-toggle]");
         if (!toggle) {
           return;
