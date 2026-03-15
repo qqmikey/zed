@@ -7,23 +7,23 @@ pub fn default_client_html() -> &'static str {
   <title>Agent Companion</title>
   <style>
     :root {
-      color-scheme: light;
-      --page-bg: #efe7da;
-      --shell-bg: rgba(251, 247, 240, 0.9);
-      --panel-border: rgba(75, 59, 40, 0.12);
-      --text-strong: #1f1913;
-      --text-muted: #706352;
-      --text-soft: #948676;
-      --surface: rgba(255, 255, 255, 0.76);
-      --surface-strong: rgba(255, 255, 255, 0.94);
-      --user-bubble: #d7bf9d;
-      --assistant-bubble: rgba(255, 255, 255, 0.96);
-      --success: #2f6a4b;
-      --warning: #9b6429;
-      --danger: #8f3535;
-      --action: #1f1913;
-      --action-text: #fff9f0;
-      --shadow: 0 18px 40px rgba(57, 41, 22, 0.12);
+      color-scheme: dark;
+      --page-bg: #17191f;
+      --shell-bg: rgba(31, 33, 40, 0.94);
+      --panel-border: rgba(255, 255, 255, 0.08);
+      --text-strong: #e7eaf0;
+      --text-muted: #a3acba;
+      --text-soft: #737c8d;
+      --surface: rgba(42, 45, 54, 0.92);
+      --surface-strong: rgba(47, 50, 61, 0.98);
+      --user-bubble: #1f3c63;
+      --assistant-bubble: rgba(42, 45, 54, 0.98);
+      --success: #5cbf89;
+      --warning: #d0a14a;
+      --danger: #d66b6b;
+      --action: #2f6feb;
+      --action-text: #f8fbff;
+      --shadow: 0 20px 44px rgba(0, 0, 0, 0.42);
       --radius-xl: 24px;
       --radius-lg: 18px;
       --radius-md: 14px;
@@ -38,8 +38,9 @@ pub fn default_client_html() -> &'static str {
       min-height: 100%;
       margin: 0;
       background:
-        radial-gradient(circle at top left, rgba(215, 191, 157, 0.52), transparent 28%),
-        linear-gradient(180deg, #f8f2e8 0%, var(--page-bg) 54%, #e9decd 100%);
+        radial-gradient(circle at top left, rgba(47, 111, 235, 0.16), transparent 26%),
+        radial-gradient(circle at bottom right, rgba(104, 84, 255, 0.1), transparent 24%),
+        linear-gradient(180deg, #1b1d24 0%, var(--page-bg) 52%, #14161c 100%);
       color: var(--text-strong);
       font-family: "Avenir Next", "Segoe UI", sans-serif;
     }
@@ -64,8 +65,8 @@ pub fn default_client_html() -> &'static str {
 
     .topbar {
       padding: 16px 16px 14px;
-      border-bottom: 1px solid rgba(75, 59, 40, 0.08);
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0));
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0));
     }
 
     .topbar-row {
@@ -105,7 +106,7 @@ pub fn default_client_html() -> &'static str {
       gap: 8px;
       padding: 8px 11px;
       border-radius: 999px;
-      background: rgba(31, 25, 19, 0.08);
+      background: rgba(255, 255, 255, 0.04);
       color: var(--text-strong);
       font-size: 11px;
       font-weight: 700;
@@ -125,27 +126,27 @@ pub fn default_client_html() -> &'static str {
 
     .connection.connected {
       color: var(--success);
-      background: rgba(47, 106, 75, 0.12);
+      background: rgba(92, 191, 137, 0.12);
     }
 
     .connection.connecting,
     .connection.reconnecting {
       color: var(--warning);
-      background: rgba(155, 100, 41, 0.12);
+      background: rgba(208, 161, 74, 0.12);
     }
 
     .connection.error,
     .connection.disconnected {
       color: var(--danger);
-      background: rgba(143, 53, 53, 0.12);
+      background: rgba(214, 107, 107, 0.12);
     }
 
     .activity {
       margin-top: 12px;
       padding: 10px 12px;
       border-radius: var(--radius-md);
-      background: rgba(255, 255, 255, 0.55);
-      border: 1px solid rgba(75, 59, 40, 0.08);
+      background: var(--surface);
+      border: 1px solid rgba(255, 255, 255, 0.05);
       color: var(--text-muted);
       font-size: 13px;
       line-height: 1.4;
@@ -169,8 +170,8 @@ pub fn default_client_html() -> &'static str {
       margin: auto;
       padding: 18px 16px;
       border-radius: var(--radius-lg);
-      border: 1px dashed rgba(75, 59, 40, 0.18);
-      background: rgba(255, 255, 255, 0.42);
+      border: 1px dashed rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.03);
       color: var(--text-muted);
       text-align: center;
       max-width: 28ch;
@@ -201,9 +202,9 @@ pub fn default_client_html() -> &'static str {
       max-width: min(92%, 560px);
       padding: 12px 14px;
       border-radius: 20px;
-      border: 1px solid rgba(75, 59, 40, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.06);
       background: var(--assistant-bubble);
-      box-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.14);
     }
 
     .message-row.user .message {
@@ -218,7 +219,7 @@ pub fn default_client_html() -> &'static str {
 
     .message-row.system .message,
     .message-row.tool .message {
-      background: rgba(31, 25, 19, 0.06);
+      background: rgba(255, 255, 255, 0.04);
       color: var(--text-muted);
     }
 
@@ -268,8 +269,8 @@ pub fn default_client_html() -> &'static str {
 
     .composer {
       padding: 10px 12px 12px;
-      border-top: 1px solid rgba(75, 59, 40, 0.08);
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.3));
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.01), rgba(255, 255, 255, 0.03));
       display: grid;
       gap: 10px;
     }
@@ -279,23 +280,23 @@ pub fn default_client_html() -> &'static str {
       min-height: 86px;
       max-height: 180px;
       resize: vertical;
-      border: 1px solid rgba(75, 59, 40, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: var(--radius-lg);
       padding: 13px 14px;
       font: inherit;
       color: var(--text-strong);
       background: var(--surface-strong);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
     }
 
     textarea:focus {
-      outline: 2px solid rgba(31, 25, 19, 0.12);
-      border-color: rgba(31, 25, 19, 0.18);
+      outline: 2px solid rgba(47, 111, 235, 0.22);
+      border-color: rgba(47, 111, 235, 0.38);
     }
 
     textarea:disabled {
       color: var(--text-soft);
-      background: rgba(255, 255, 255, 0.6);
+      background: rgba(255, 255, 255, 0.04);
       cursor: not-allowed;
     }
 
@@ -336,7 +337,7 @@ pub fn default_client_html() -> &'static str {
     }
 
     .action-button.stop {
-      background: linear-gradient(135deg, #8f3535, #b45c4e);
+      background: linear-gradient(135deg, #a44a4a, #c36262);
     }
 
     .action-button:disabled {
@@ -534,6 +535,8 @@ pub fn default_client_html() -> &'static str {
       function renderMessages() {
         const shouldStick = shouldAutoScroll();
         const entries = state.snapshot.messages.slice();
+        const showThinkingIndicator =
+          !state.snapshot.streaming_text && state.snapshot.run_status === "thinking";
 
         if (state.snapshot.streaming_text) {
           entries.push({
@@ -542,6 +545,17 @@ pub fn default_client_html() -> &'static str {
             status: "pending",
             text: state.snapshot.streaming_text,
             streaming: true
+          });
+        }
+
+        if (showThinkingIndicator) {
+          entries.push({
+            id: "thinking-preview",
+            role: "assistant",
+            status: "pending",
+            text: "",
+            streaming: true,
+            placeholder: true
           });
         }
 
@@ -558,6 +572,9 @@ pub fn default_client_html() -> &'static str {
           const statusLabel = message.streaming
             ? '<span class="streaming-indicator">Streaming</span>'
             : escapeHtml(titleCase(message.status));
+          const body = message.placeholder
+            ? '<div class="message-body"><span class="streaming-indicator">Thinking</span></div>'
+            : `<div class="message-body">${escapeHtml(message.text)}</div>`;
 
           return `
             <div class="message-row ${escapeHtml(message.streaming ? "streaming" : message.role)}">
@@ -566,7 +583,7 @@ pub fn default_client_html() -> &'static str {
                   <span>${escapeHtml(roleLabel)}</span>
                   <span>${statusLabel}</span>
                 </div>
-                <div class="message-body">${escapeHtml(message.text)}</div>
+                ${body}
               </article>
             </div>
           `;

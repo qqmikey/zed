@@ -312,12 +312,7 @@ fn snapshot_for_acp_thread(
         .collect::<Vec<_>>();
 
     let streaming_text = if thread.status() == ThreadStatus::Generating {
-        messages
-            .iter()
-            .rev()
-            .find(|message| message.role == CompanionMessageRole::Assistant)
-            .map(|message| message.text.clone())
-            .filter(|text| !text.is_empty())
+        streaming_text_for_messages(&messages)
     } else {
         None
     };
@@ -356,15 +351,7 @@ fn snapshot_for_text_thread(
         })
         .collect::<Vec<_>>();
 
-    let streaming_text = messages
-        .iter()
-        .rev()
-        .find(|message| {
-            message.role == CompanionMessageRole::Assistant
-                && message.status == CompanionMessageStatus::Pending
-        })
-        .map(|message| message.text.clone())
-        .filter(|text| !text.is_empty());
+    let streaming_text = streaming_text_for_messages(&messages);
 
     CompanionSnapshot {
         protocol_version: 1,
@@ -387,6 +374,18 @@ fn map_role(role: Role) -> CompanionMessageRole {
         Role::Assistant => CompanionMessageRole::Assistant,
         Role::System => CompanionMessageRole::System,
     }
+}
+
+fn streaming_text_for_messages(messages: &[CompanionMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == CompanionMessageRole::Assistant
+                && message.status == CompanionMessageStatus::Pending
+        })
+        .map(|message| message.text.clone())
+        .filter(|text| !text.is_empty())
 }
 
 fn map_text_message_status(status: &TextMessageStatus) -> CompanionMessageStatus {
@@ -525,8 +524,14 @@ mod tests {
 
     use assistant_text_thread::TextThread;
 
-    use super::{CompanionSessionMirror, CompanionSessionSource, empty_snapshot, truncate_preview};
-    use crate::{CompanionConnectionMetadata, CompanionEvent, CompanionRunStatus};
+    use super::{
+        CompanionSessionMirror, CompanionSessionSource, empty_snapshot,
+        streaming_text_for_messages, truncate_preview,
+    };
+    use crate::{
+        CompanionConnectionMetadata, CompanionEvent, CompanionMessage, CompanionMessageRole,
+        CompanionMessageStatus, CompanionRunStatus,
+    };
 
     #[gpui::test]
     async fn text_thread_source_replacement_emits_snapshot(cx: &mut TestAppContext) {
@@ -595,5 +600,40 @@ mod tests {
         assert!(snapshot.messages.is_empty());
         assert!(snapshot.tool_calls.is_empty());
         assert!(snapshot.available_commands.is_empty());
+    }
+
+    #[test]
+    fn streaming_text_ignores_previous_completed_assistant_message() {
+        let messages = vec![
+            CompanionMessage {
+                id: "assistant-1".into(),
+                role: CompanionMessageRole::Assistant,
+                status: CompanionMessageStatus::Done,
+                text: "previous reply".into(),
+            },
+            CompanionMessage {
+                id: "user-2".into(),
+                role: CompanionMessageRole::User,
+                status: CompanionMessageStatus::Done,
+                text: "new question".into(),
+            },
+        ];
+
+        assert_eq!(streaming_text_for_messages(&messages), None);
+    }
+
+    #[test]
+    fn streaming_text_uses_pending_assistant_message() {
+        let messages = vec![CompanionMessage {
+            id: "assistant-1".into(),
+            role: CompanionMessageRole::Assistant,
+            status: CompanionMessageStatus::Pending,
+            text: "streaming reply".into(),
+        }];
+
+        assert_eq!(
+            streaming_text_for_messages(&messages),
+            Some("streaming reply".into())
+        );
     }
 }
