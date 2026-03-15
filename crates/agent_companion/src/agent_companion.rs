@@ -19,7 +19,7 @@ pub use protocol::{
     CompanionAttachment, CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata,
     CompanionEvent, CompanionMessage, CompanionMessageRole, CompanionMessageStatus,
     CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot, CompanionToolCall,
-    CompanionToolCallStatus,
+    CompanionToolCallStatus, CompanionUpload,
 };
 pub use server::{CompanionServerHandle, CompanionServerStart, CompanionServerState};
 pub use session_mirror::{CompanionSessionMirror, CompanionSessionSource};
@@ -345,9 +345,9 @@ impl CompanionManager {
 
     fn handle_command(&mut self, command: CompanionCommand, cx: &mut Context<Self>) -> Result<()> {
         match command {
-            CompanionCommand::SendMessage { text } => {
+            CompanionCommand::SendMessage { text, attachments } => {
                 self.mirror
-                    .update(cx, |mirror, cx| mirror.send_message(text, cx))
+                    .update(cx, |mirror, cx| mirror.send_message(text, attachments, cx))
                     .detach_and_log_err(cx);
             }
             CompanionCommand::StopRun => {

@@ -372,6 +372,44 @@ pub fn default_client_html() -> &'static str {
       cursor: not-allowed;
     }
 
+    .selected-attachments {
+      display: grid;
+      gap: 8px;
+    }
+
+    .selected-attachments:empty {
+      display: none;
+    }
+
+    .selected-attachment {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .selected-attachment-copy {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+    }
+
+    .selected-attachment-name {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-strong);
+      word-break: break-word;
+    }
+
+    .selected-attachment-meta {
+      font-size: 12px;
+      color: var(--text-soft);
+    }
+
     .composer-bar {
       display: flex;
       align-items: center;
@@ -419,6 +457,48 @@ pub fn default_client_html() -> &'static str {
 
     .action-button:not(:disabled):active {
       transform: translateY(1px);
+    }
+
+    .composer-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .secondary-button {
+      appearance: none;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      min-width: 40px;
+      min-height: 40px;
+      padding: 0 14px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-strong);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .secondary-button:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+
+    .remove-attachment {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      min-width: 28px;
+      min-height: 28px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-strong);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .file-input {
+      display: none;
     }
 
     @media (max-width: 560px) {
@@ -474,7 +554,12 @@ pub fn default_client_html() -> &'static str {
 
     <form class="composer" id="composer-form">
       <textarea id="composer-input" placeholder="Send a follow-up to the active Zed session"></textarea>
+      <input class="file-input" id="attachment-input" type="file" multiple>
+      <div class="selected-attachments" id="selected-attachments"></div>
       <div class="composer-bar">
+        <div class="composer-tools">
+          <button class="secondary-button" id="attach-button" type="button">Attach</button>
+        </div>
         <div class="feedback" id="feedback"></div>
         <button class="action-button" id="action-button" type="submit">Send</button>
       </div>
@@ -496,6 +581,7 @@ pub fn default_client_html() -> &'static str {
         feedback: "",
         feedbackKind: "info",
         pendingSend: false,
+        pendingAttachments: [],
         socket: null,
         forceScrollToBottom: true
       };
@@ -508,9 +594,14 @@ pub fn default_client_html() -> &'static str {
         messages: document.getElementById("messages"),
         composerForm: document.getElementById("composer-form"),
         input: document.getElementById("composer-input"),
+        attachmentInput: document.getElementById("attachment-input"),
+        selectedAttachments: document.getElementById("selected-attachments"),
+        attachButton: document.getElementById("attach-button"),
         actionButton: document.getElementById("action-button"),
         feedback: document.getElementById("feedback")
       };
+
+      const maxAttachmentBytes = 10 * 1024 * 1024;
 
       function token() {
         return new URLSearchParams(window.location.search).get("token") || "";
@@ -550,6 +641,10 @@ pub fn default_client_html() -> &'static str {
 
       function commandAvailable(kind) {
         return state.snapshot.available_commands.includes(kind);
+      }
+
+      function attachmentUploadAvailable() {
+        return commandAvailable("send_attachments");
       }
 
       function activeToolSummary() {
@@ -595,6 +690,31 @@ pub fn default_client_html() -> &'static str {
       function renderFeedback() {
         elements.feedback.textContent = state.feedback;
         elements.feedback.className = `feedback ${state.feedbackKind}`;
+      }
+
+      function selectedAttachmentSummary(file) {
+        const size = file.size >= 1024 * 1024
+          ? `${(file.size / (1024 * 1024)).toFixed(1)} MB`
+          : `${Math.max(1, Math.round(file.size / 1024))} KB`;
+        const type = file.type || "file";
+        return `${type} · ${size}`;
+      }
+
+      function renderSelectedAttachments() {
+        if (!state.pendingAttachments.length) {
+          elements.selectedAttachments.innerHTML = "";
+          return;
+        }
+
+        elements.selectedAttachments.innerHTML = state.pendingAttachments.map((file, index) => `
+          <div class="selected-attachment">
+            <div class="selected-attachment-copy">
+              <div class="selected-attachment-name">${escapeHtml(file.name)}</div>
+              <div class="selected-attachment-meta">${escapeHtml(selectedAttachmentSummary(file))}</div>
+            </div>
+            <button class="remove-attachment" type="button" data-attachment-index="${index}">×</button>
+          </div>
+        `).join("");
       }
 
       function shouldAutoScroll() {
@@ -751,13 +871,18 @@ pub fn default_client_html() -> &'static str {
       function renderActionButton() {
         const hasStop = commandAvailable("stop_run");
         const canSend = commandAvailable("send_message") && !state.pendingSend;
-        const sendReady = canSend && elements.input.value.trim().length > 0;
+        const attachmentsAllowed =
+          state.pendingAttachments.length === 0 || attachmentUploadAvailable();
+        const sendReady = canSend &&
+          attachmentsAllowed &&
+          (elements.input.value.trim().length > 0 || state.pendingAttachments.length > 0);
 
         if (hasStop) {
           elements.actionButton.textContent = "Stop";
           elements.actionButton.className = "action-button stop";
           elements.actionButton.disabled = false;
           elements.input.disabled = true;
+          elements.attachButton.disabled = true;
           elements.input.placeholder = "Wait for the current run to finish or stop it.";
           return;
         }
@@ -766,6 +891,7 @@ pub fn default_client_html() -> &'static str {
         elements.actionButton.className = "action-button";
         elements.actionButton.disabled = !sendReady;
         elements.input.disabled = !commandAvailable("send_message");
+        elements.attachButton.disabled = !attachmentUploadAvailable() || state.pendingSend;
         elements.input.placeholder = commandAvailable("send_message")
           ? "Send a follow-up to the active Zed session"
           : "This session is not ready for input";
@@ -783,8 +909,26 @@ pub fn default_client_html() -> &'static str {
         elements.activityLine.textContent = activityText();
 
         renderMessages();
+        renderSelectedAttachments();
         renderActionButton();
         renderFeedback();
+      }
+
+      function fileToUpload(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+          reader.onload = () => {
+            const result = typeof reader.result === "string" ? reader.result : "";
+            const [, dataBase64 = ""] = result.split(",", 2);
+            resolve({
+              name: file.name,
+              mime_type: file.type || "application/octet-stream",
+              data_base64: dataBase64
+            });
+          };
+          reader.readAsDataURL(file);
+        });
       }
 
       async function postCommand(command) {
@@ -795,6 +939,9 @@ pub fn default_client_html() -> &'static str {
         });
 
         if (!response.ok) {
+          if (response.status === 413) {
+            throw new Error("Attachments exceed the companion upload request limit. Try fewer or smaller files.");
+          }
           throw new Error(`Command failed with status ${response.status}`);
         }
       }
@@ -899,7 +1046,11 @@ pub fn default_client_html() -> &'static str {
 
       async function sendMessage() {
         const text = elements.input.value.trim();
-        if (!text || !commandAvailable("send_message")) {
+        if (
+          (!text && state.pendingAttachments.length === 0) ||
+          !commandAvailable("send_message") ||
+          (state.pendingAttachments.length > 0 && !attachmentUploadAvailable())
+        ) {
           return;
         }
 
@@ -907,8 +1058,11 @@ pub fn default_client_html() -> &'static str {
         render();
 
         try {
-          await postCommand({ type: "send_message", text });
+          const attachments = await Promise.all(state.pendingAttachments.map(fileToUpload));
+          await postCommand({ type: "send_message", text, attachments });
           elements.input.value = "";
+          state.pendingAttachments = [];
+          elements.attachmentInput.value = "";
           state.forceScrollToBottom = true;
           setFeedback("Message sent to the active Zed session.", "success");
         } catch (error) {
@@ -948,6 +1102,47 @@ pub fn default_client_html() -> &'static str {
 
       elements.input.addEventListener("input", () => {
         renderActionButton();
+      });
+
+      elements.attachButton.addEventListener("click", () => {
+        if (!attachmentUploadAvailable() || state.pendingSend || commandAvailable("stop_run")) {
+          return;
+        }
+        elements.attachmentInput.click();
+      });
+
+      elements.attachmentInput.addEventListener("change", event => {
+        const files = Array.from(event.target.files || []);
+        if (!files.length) {
+          return;
+        }
+
+        const accepted = [];
+        for (const file of files) {
+          if (file.size > maxAttachmentBytes) {
+            setFeedback(`${file.name} exceeds the 10 MB companion upload limit.`, "error");
+            continue;
+          }
+          accepted.push(file);
+        }
+
+        state.pendingAttachments = state.pendingAttachments.concat(accepted);
+        render();
+      });
+
+      elements.selectedAttachments.addEventListener("click", event => {
+        const button = event.target.closest("[data-attachment-index]");
+        if (!button) {
+          return;
+        }
+
+        const index = Number(button.getAttribute("data-attachment-index"));
+        if (!Number.isFinite(index)) {
+          return;
+        }
+
+        state.pendingAttachments.splice(index, 1);
+        render();
       });
 
       elements.input.addEventListener("keydown", event => {

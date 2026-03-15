@@ -128,7 +128,11 @@ pub enum CompanionRunStatus {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompanionCommand {
-    SendMessage { text: String },
+    SendMessage {
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<CompanionUpload>,
+    },
     StopRun,
 }
 
@@ -136,7 +140,15 @@ pub enum CompanionCommand {
 #[serde(rename_all = "snake_case")]
 pub enum CompanionCommandKind {
     SendMessage,
+    SendAttachments,
     StopRun,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompanionUpload {
+    pub name: String,
+    pub mime_type: String,
+    pub data_base64: String,
 }
 
 #[cfg(test)]
@@ -145,7 +157,7 @@ mod tests {
         CompanionAttachment, CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata,
         CompanionEvent, CompanionMessage, CompanionMessageRole, CompanionMessageStatus,
         CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot, CompanionToolCall,
-        CompanionToolCallStatus,
+        CompanionToolCallStatus, CompanionUpload,
     };
 
     #[test]
@@ -200,6 +212,7 @@ mod tests {
             run_status: CompanionRunStatus::RunningTools,
             available_commands: vec![
                 CompanionCommandKind::SendMessage,
+                CompanionCommandKind::SendAttachments,
                 CompanionCommandKind::StopRun,
             ],
         };
@@ -236,11 +249,17 @@ mod tests {
     fn command_round_trips_with_tagged_payloads() -> anyhow::Result<()> {
         let command = CompanionCommand::SendMessage {
             text: "Stop after this test run".into(),
+            attachments: vec![CompanionUpload {
+                name: "calculator-window.png".into(),
+                mime_type: "image/png".into(),
+                data_base64: "AQID".into(),
+            }],
         };
 
         let json = serde_json::to_value(&command)?;
         assert_eq!(json["type"], "send_message");
         assert_eq!(json["text"], "Stop after this test run");
+        assert_eq!(json["attachments"][0]["name"], "calculator-window.png");
 
         let round_trip: CompanionCommand = serde_json::from_value(json)?;
         assert_eq!(round_trip, command);

@@ -3,7 +3,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{
-        Path, Query, State,
+        DefaultBodyLimit, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{
@@ -31,6 +31,8 @@ use crate::{
     CompanionAsset, CompanionAssetDisposition, CompanionAssetSource, CompanionCommand,
     CompanionEvent, CompanionSnapshot,
 };
+
+const COMMAND_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct CompanionServerState {
@@ -175,7 +177,10 @@ fn router(state: CompanionServerState) -> Router {
         .route("/companion/snapshot", get(companion_snapshot))
         .route("/companion/events", get(companion_events))
         .route("/companion/assets/:asset_id", get(companion_asset))
-        .route("/companion/command", post(companion_command))
+        .route(
+            "/companion/command",
+            post(companion_command).layer(DefaultBodyLimit::max(COMMAND_BODY_LIMIT_BYTES)),
+        )
         .with_state(state)
 }
 
@@ -338,7 +343,7 @@ mod tests {
     use super::{CompanionServerState, default_client_html, router};
     use crate::{
         CompanionAsset, CompanionAssetDisposition, CompanionAssetSource, CompanionCommand,
-        CompanionConnectionMetadata, CompanionRunStatus, CompanionSnapshot,
+        CompanionConnectionMetadata, CompanionRunStatus, CompanionSnapshot, CompanionUpload,
     };
 
     fn test_state() -> (
@@ -450,6 +455,7 @@ mod tests {
                     .body(Body::from(
                         serde_json::to_vec(&CompanionCommand::SendMessage {
                             text: "hello from mobile".into(),
+                            attachments: Vec::new(),
                         })
                         .expect("json"),
                     ))
@@ -464,8 +470,46 @@ mod tests {
             command,
             CompanionCommand::SendMessage {
                 text: "hello from mobile".into(),
+                attachments: Vec::new(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn command_route_accepts_large_attachment_payload() {
+        let (state, mut command_rx) = test_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/companion/command?token=test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CompanionCommand::SendMessage {
+                            text: String::new(),
+                            attachments: vec![CompanionUpload {
+                                name: "large.png".into(),
+                                mime_type: "image/png".into(),
+                                data_base64: "A".repeat(3 * 1024 * 1024),
+                            }],
+                        })
+                        .expect("json"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let command = command_rx.next().await.expect("command");
+        match command {
+            CompanionCommand::SendMessage { attachments, .. } => {
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].name, "large.png");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[tokio::test]

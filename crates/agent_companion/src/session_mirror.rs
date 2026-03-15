@@ -4,18 +4,19 @@ use anyhow::{Result, anyhow};
 use assistant_text_thread::{
     MessageStatus as TextMessageStatus, TextThread, TextThreadEvent, TextThreadSummary,
 };
-use gpui::{App, Context, Entity, EventEmitter, Subscription, Task};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Subscription, Task};
 use language_model::Role;
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use url::Url;
+use uuid::Uuid;
 
 use crate::{
     CompanionAsset, CompanionAssetDisposition, CompanionAssetSource, CompanionAttachment,
     CompanionCommandKind, CompanionConnectionMetadata, CompanionEvent, CompanionMessage,
     CompanionMessageRole, CompanionMessageStatus, CompanionRunStatus, CompanionSessionSummary,
-    CompanionSnapshot, CompanionToolCall, CompanionToolCallStatus,
+    CompanionSnapshot, CompanionToolCall, CompanionToolCallStatus, CompanionUpload,
 };
 
 #[derive(Clone)]
@@ -91,25 +92,29 @@ impl CompanionSessionMirror {
         cx.notify();
     }
 
-    pub fn send_message(&mut self, text: String, cx: &mut Context<Self>) -> Task<Result<()>> {
+    pub fn send_message(
+        &mut self,
+        text: String,
+        attachments: Vec<CompanionUpload>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
         let Some(source) = self.source.clone() else {
             return Task::ready(Err(anyhow!("no active companion session")));
         };
 
         match source {
-            CompanionSessionSource::AcpThread(thread) => {
-                let send = thread.update(cx, |thread, cx| {
-                    thread.send(
-                        vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
-                        cx,
-                    )
-                });
-                cx.spawn(async move |_this, _cx| {
-                    send.await?;
-                    Ok(())
-                })
-            }
+            CompanionSessionSource::AcpThread(thread) => cx.spawn(async move |_this, cx| {
+                let message = build_uploaded_message(text, attachments, cx).await?;
+                let send = thread.update(cx, |thread, cx| thread.send(message, cx));
+                send.await?;
+                Ok(())
+            }),
             CompanionSessionSource::TextThread(thread) => thread.update(cx, move |thread, cx| {
+                if !attachments.is_empty() {
+                    return Task::ready(Err(anyhow!(
+                        "text thread companion uploads are not supported yet"
+                    )));
+                }
                 let Some(last_message) = thread.messages(cx).last() else {
                     return Task::ready(Err(anyhow!("text thread has no draft message")));
                 };
@@ -517,11 +522,36 @@ fn map_acp_run_status(thread: &AcpThread) -> CompanionRunStatus {
 }
 
 fn available_commands_for_acp_thread(thread: &AcpThread) -> Vec<CompanionCommandKind> {
-    let mut commands = vec![CompanionCommandKind::SendMessage];
+    let mut commands = vec![
+        CompanionCommandKind::SendMessage,
+        CompanionCommandKind::SendAttachments,
+    ];
     if thread.status() == ThreadStatus::Generating {
         commands.push(CompanionCommandKind::StopRun);
     }
     commands
+}
+
+async fn build_uploaded_message(
+    text: String,
+    uploads: Vec<CompanionUpload>,
+    cx: &mut gpui::AsyncApp,
+) -> Result<Vec<acp::ContentBlock>> {
+    let uploaded_blocks = cx
+        .background_spawn(async move { uploaded_blocks_for_companion_uploads(uploads) })
+        .await?;
+    let mut message = Vec::new();
+
+    if !text.trim().is_empty() {
+        message.push(acp::ContentBlock::Text(acp::TextContent::new(text)));
+    }
+    message.extend(uploaded_blocks);
+
+    if message.is_empty() {
+        return Err(anyhow!("companion message is empty"));
+    }
+
+    Ok(message)
 }
 
 #[derive(Default)]
@@ -876,6 +906,85 @@ fn local_file_path_from_uri(uri: &str) -> Option<PathBuf> {
         return None;
     }
     url.to_file_path().ok()
+}
+
+fn uploaded_blocks_for_companion_uploads(
+    uploads: Vec<CompanionUpload>,
+) -> Result<Vec<acp::ContentBlock>> {
+    let mut blocks = Vec::with_capacity(uploads.len());
+
+    for upload in uploads {
+        blocks.push(uploaded_block_for_companion_upload(upload)?);
+    }
+
+    Ok(blocks)
+}
+
+fn uploaded_block_for_companion_upload(upload: CompanionUpload) -> Result<acp::ContentBlock> {
+    let path = persist_companion_upload(&upload)?;
+    let uri = companion_upload_uri(&path)?;
+
+    if is_inline_image_mime_type(&upload.mime_type) {
+        Ok(acp::ContentBlock::Image(
+            acp::ImageContent::new(upload.data_base64, upload.mime_type).uri(Some(uri)),
+        ))
+    } else {
+        Ok(acp::ContentBlock::ResourceLink(
+            acp::ResourceLink::new(upload.name, uri).mime_type(Some(upload.mime_type)),
+        ))
+    }
+}
+
+fn persist_companion_upload(upload: &CompanionUpload) -> Result<PathBuf> {
+    use base64::Engine as _;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(upload.data_base64.as_bytes())
+        .map_err(|error| anyhow!("invalid companion upload data: {error}"))?;
+    let directory = companion_upload_directory();
+    std::fs::create_dir_all(&directory)?;
+
+    let file_name = sanitized_upload_file_name(&upload.name);
+    let path = directory.join(format!("{}-{file_name}", Uuid::new_v4()));
+    std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+fn companion_upload_directory() -> PathBuf {
+    std::env::temp_dir().join("zed-companion-uploads")
+}
+
+fn companion_upload_uri(path: &Path) -> Result<String> {
+    Url::from_file_path(path)
+        .map(|url| url.to_string())
+        .map_err(|_| anyhow!("failed to create upload file uri"))
+}
+
+fn sanitized_upload_file_name(name: &str) -> String {
+    let trimmed = name.trim();
+    let candidate = if trimmed.is_empty() {
+        "attachment".to_string()
+    } else {
+        trimmed
+            .chars()
+            .map(|character| match character {
+                '/' | '\\' | '\n' | '\r' | '\t' => '_',
+                other => other,
+            })
+            .collect::<String>()
+    };
+
+    let sanitized = candidate
+        .trim_matches('.')
+        .trim()
+        .chars()
+        .take(160)
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "attachment".into()
+    } else {
+        sanitized
+    }
 }
 
 fn local_file_path_from_link_target(target: &str) -> Option<PathBuf> {
