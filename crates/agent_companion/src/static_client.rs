@@ -51,6 +51,7 @@ pub fn default_client_html() -> &'static str {
 
     .app {
       width: min(100%, 760px);
+      height: calc(100svh - 24px);
       min-height: calc(100svh - 24px);
       margin: 0 auto;
       display: grid;
@@ -157,10 +158,127 @@ pub fn default_client_html() -> &'static str {
       overflow: hidden;
     }
 
+    .permission-card {
+      margin: 0;
+      padding: 12px 14px;
+      border-radius: var(--radius-lg);
+      background: rgba(47, 111, 235, 0.1);
+      border: 1px solid rgba(47, 111, 235, 0.24);
+      display: grid;
+      gap: 12px;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.16);
+    }
+
+    .permission-card:empty {
+      display: none;
+    }
+
+    .permission-copy {
+      display: grid;
+      gap: 4px;
+    }
+
+    .permission-kicker {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--warning);
+      font-weight: 700;
+    }
+
+    .permission-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-strong);
+      line-height: 1.45;
+    }
+
+    .permission-meta {
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.45;
+    }
+
+    .permission-choices {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .permission-choice {
+      appearance: none;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      min-height: 36px;
+      padding: 0 12px;
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-strong);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .permission-choice.selected {
+      background: rgba(47, 111, 235, 0.22);
+      border-color: rgba(47, 111, 235, 0.45);
+      color: var(--action-text);
+    }
+
+    .permission-choice:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .permission-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .permission-actions.flat {
+      display: grid;
+      gap: 8px;
+    }
+
+    .permission-button {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      min-height: 38px;
+      padding: 0 14px;
+      color: var(--action-text);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .permission-button.full {
+      width: 100%;
+      justify-content: flex-start;
+      text-align: left;
+      padding: 10px 14px;
+      line-height: 1.35;
+    }
+
+    .permission-button.allow {
+      background: rgba(92, 191, 137, 0.82);
+    }
+
+    .permission-button.reject {
+      background: rgba(214, 107, 107, 0.82);
+    }
+
+    .permission-button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
     .messages {
       height: 100%;
       overflow-y: auto;
-      padding: 14px 12px 6px;
+      padding: 14px 12px 12px;
       display: grid;
       gap: 10px;
       align-content: start;
@@ -345,6 +463,10 @@ pub fn default_client_html() -> &'static str {
       background: linear-gradient(180deg, rgba(255, 255, 255, 0.01), rgba(255, 255, 255, 0.03));
       display: grid;
       gap: 10px;
+      position: sticky;
+      bottom: 0;
+      z-index: 3;
+      box-shadow: 0 -14px 30px rgba(0, 0, 0, 0.2);
     }
 
     textarea {
@@ -508,6 +630,7 @@ pub fn default_client_html() -> &'static str {
 
       .app {
         width: 100%;
+        height: 100svh;
         min-height: 100svh;
         border-radius: 0;
         border-left: none;
@@ -553,6 +676,7 @@ pub fn default_client_html() -> &'static str {
     </section>
 
     <form class="composer" id="composer-form">
+      <div class="permission-card" id="permission-card"></div>
       <textarea id="composer-input" placeholder="Send a follow-up to the active Zed session"></textarea>
       <input class="file-input" id="attachment-input" type="file" multiple>
       <div class="selected-attachments" id="selected-attachments"></div>
@@ -572,6 +696,7 @@ pub fn default_client_html() -> &'static str {
         snapshot: {
           session: null,
           messages: [],
+          has_more_messages_before: false,
           streaming_text: null,
           tool_calls: [],
           run_status: "idle",
@@ -581,7 +706,12 @@ pub fn default_client_html() -> &'static str {
         feedback: "",
         feedbackKind: "info",
         pendingSend: false,
+        pendingAuthorization: false,
+        pendingAuthorizationOptionId: null,
+        pendingAuthorizationToolCallId: null,
         pendingAttachments: [],
+        loadingOlderMessages: false,
+        selectedPermissionChoiceIndices: {},
         socket: null,
         forceScrollToBottom: true
       };
@@ -591,6 +721,7 @@ pub fn default_client_html() -> &'static str {
         sessionSubtitle: document.getElementById("session-subtitle"),
         connectionPill: document.getElementById("connection-pill"),
         activityLine: document.getElementById("activity-line"),
+        permissionCard: document.getElementById("permission-card"),
         messages: document.getElementById("messages"),
         composerForm: document.getElementById("composer-form"),
         input: document.getElementById("composer-input"),
@@ -602,6 +733,7 @@ pub fn default_client_html() -> &'static str {
       };
 
       const maxAttachmentBytes = 10 * 1024 * 1024;
+      const olderMessagesThreshold = 72;
 
       function token() {
         return new URLSearchParams(window.location.search).get("token") || "";
@@ -632,6 +764,14 @@ pub fn default_client_html() -> &'static str {
         return apiPath(`/companion/assets/${encodeURIComponent(assetId)}`);
       }
 
+      function messagesPageUrl(beforeMessageId) {
+        const url = new URL(apiPath("/companion/messages"), window.location.origin);
+        if (beforeMessageId) {
+          url.searchParams.set("before_message_id", beforeMessageId);
+        }
+        return url.pathname + url.search;
+      }
+
       function titleCase(value) {
         return value
           .split("_")
@@ -647,6 +787,124 @@ pub fn default_client_html() -> &'static str {
         return commandAvailable("send_attachments");
       }
 
+      function authorizationAvailable() {
+        return commandAvailable("authorize_tool_call");
+      }
+
+      function activePermissionToolCall() {
+        return (state.snapshot.tool_calls || []).find(tool =>
+          tool.status === "waiting_for_confirmation" &&
+          tool.permission_request &&
+          (
+            (tool.permission_request.kind === "dropdown" &&
+              Array.isArray(tool.permission_request.choices) &&
+              tool.permission_request.choices.length > 0) ||
+            (tool.permission_request.kind === "flat" &&
+              Array.isArray(tool.permission_request.options) &&
+              tool.permission_request.options.length > 0)
+          )
+        ) || null;
+      }
+
+      function selectedPermissionChoiceIndex(toolCall) {
+        if (
+          !toolCall ||
+          !toolCall.permission_request ||
+          toolCall.permission_request.kind !== "dropdown"
+        ) {
+          return -1;
+        }
+
+        const request = toolCall.permission_request;
+        const stored = state.selectedPermissionChoiceIndices[toolCall.id];
+        if (Number.isInteger(stored) && stored >= 0 && stored < request.choices.length) {
+          return stored;
+        }
+
+        const defaultIndex = Number.isInteger(request.default_choice_index)
+          ? request.default_choice_index
+          : request.choices.length - 1;
+        return Math.max(0, Math.min(defaultIndex, request.choices.length - 1));
+      }
+
+      function selectedPermissionChoice(toolCall) {
+        if (
+          !toolCall ||
+          !toolCall.permission_request ||
+          toolCall.permission_request.kind !== "dropdown"
+        ) {
+          return null;
+        }
+
+        return toolCall.permission_request.choices[selectedPermissionChoiceIndex(toolCall)] || null;
+      }
+
+      function prunePermissionState() {
+        const activePermissionIds = new Set((state.snapshot.tool_calls || [])
+          .filter(tool => tool.status === "waiting_for_confirmation")
+          .map(tool => tool.id));
+
+        for (const toolCallId of Object.keys(state.selectedPermissionChoiceIndices)) {
+          if (!activePermissionIds.has(toolCallId)) {
+            delete state.selectedPermissionChoiceIndices[toolCallId];
+          }
+        }
+
+        if (
+          state.pendingAuthorizationToolCallId &&
+          !activePermissionIds.has(state.pendingAuthorizationToolCallId)
+        ) {
+          state.pendingAuthorization = false;
+          state.pendingAuthorizationOptionId = null;
+          state.pendingAuthorizationToolCallId = null;
+        }
+      }
+
+      function mergeLatestMessages(incomingMessages) {
+        const currentMessages = state.snapshot.messages || [];
+        if (!currentMessages.length) {
+          return incomingMessages;
+        }
+
+        const incomingIds = new Set(incomingMessages.map(message => message.id));
+        const firstOverlapIndex = currentMessages.findIndex(message => incomingIds.has(message.id));
+
+        if (firstOverlapIndex >= 0) {
+          const preservedOlder = currentMessages
+            .slice(0, firstOverlapIndex)
+            .filter(message => !incomingIds.has(message.id));
+          return preservedOlder.concat(incomingMessages);
+        }
+
+        const merged = [];
+        const seen = new Set();
+        for (const message of currentMessages.concat(incomingMessages)) {
+          if (seen.has(message.id)) {
+            continue;
+          }
+          seen.add(message.id);
+          merged.push(message);
+        }
+        return merged;
+      }
+
+      function applySnapshot(snapshot, preserveOlderMessages = true) {
+        const currentSessionId = state.snapshot.session ? state.snapshot.session.id : null;
+        const nextSessionId = snapshot.session ? snapshot.session.id : null;
+        const shouldMergeMessages =
+          preserveOlderMessages &&
+          currentSessionId &&
+          nextSessionId &&
+          currentSessionId === nextSessionId;
+
+        state.snapshot = {
+          ...snapshot,
+          messages: shouldMergeMessages
+            ? mergeLatestMessages(snapshot.messages || [])
+            : (snapshot.messages || [])
+        };
+      }
+
       function activeToolSummary() {
         const runningTool = (state.snapshot.tool_calls || []).find(tool =>
           tool.status === "running" || tool.status === "pending"
@@ -660,7 +918,14 @@ pub fn default_client_html() -> &'static str {
       }
 
       function activityText() {
+        const permissionTool = activePermissionToolCall();
         const toolSummary = activeToolSummary();
+
+        if (permissionTool) {
+          return permissionTool.summary
+            ? `Needs approval: ${permissionTool.summary}`
+            : `Needs approval: ${permissionTool.title}`;
+        }
 
         switch (state.snapshot.run_status) {
           case "running_tools":
@@ -715,6 +980,91 @@ pub fn default_client_html() -> &'static str {
             <button class="remove-attachment" type="button" data-attachment-index="${index}">×</button>
           </div>
         `).join("");
+      }
+
+      function renderPermissionCard() {
+        const toolCall = activePermissionToolCall();
+        if (!toolCall) {
+          elements.permissionCard.innerHTML = "";
+          return;
+        }
+
+        const request = toolCall.permission_request;
+        const busy =
+          state.pendingAuthorization &&
+          state.pendingAuthorizationToolCallId === toolCall.id;
+        const canAuthorize = authorizationAvailable() && !busy;
+        const summary = toolCall.output_preview || toolCall.summary || "";
+
+        if (request.kind === "flat") {
+          elements.permissionCard.innerHTML = `
+            <div class="permission-copy">
+              <div class="permission-kicker">Approval Needed</div>
+              <div class="permission-title">${escapeHtml(toolCall.title)}</div>
+              ${summary ? `<div class="permission-meta">${escapeHtml(summary)}</div>` : ""}
+            </div>
+            <div class="permission-actions flat">
+              ${request.options.map(option => {
+                const variant = option.option_kind.startsWith("Allow") ? "allow" : "reject";
+                const buttonLabel =
+                  busy && state.pendingAuthorizationOptionId === option.option_id
+                    ? "Sending..."
+                    : option.label;
+
+                return `
+                  <button
+                    class="permission-button full ${variant}"
+                    type="button"
+                    data-permission-option-id="${escapeHtml(option.option_id)}"
+                    data-permission-option-kind="${escapeHtml(option.option_kind)}"
+                    data-tool-call-id="${escapeHtml(toolCall.id)}"
+                    ${canAuthorize ? "" : "disabled"}
+                  >${escapeHtml(buttonLabel)}</button>
+                `;
+              }).join("")}
+            </div>
+          `;
+          return;
+        }
+
+        const selectedIndex = selectedPermissionChoiceIndex(toolCall);
+
+        elements.permissionCard.innerHTML = `
+          <div class="permission-copy">
+            <div class="permission-kicker">Approval Needed</div>
+            <div class="permission-title">${escapeHtml(toolCall.title)}</div>
+            ${summary ? `<div class="permission-meta">${escapeHtml(summary)}</div>` : ""}
+          </div>
+          <div class="permission-choices" id="permission-choices">
+            ${request.choices.map((choice, index) => `
+              <button
+                class="permission-choice ${index === selectedIndex ? "selected" : ""}"
+                type="button"
+                data-permission-choice-index="${index}"
+                data-tool-call-id="${escapeHtml(toolCall.id)}"
+                ${busy ? "disabled" : ""}
+              >${escapeHtml(choice.label)}</button>
+            `).join("")}
+          </div>
+          <div class="permission-actions">
+            <button
+              class="permission-button allow"
+              id="allow-button"
+              type="button"
+              data-permission-action="allow"
+              data-tool-call-id="${escapeHtml(toolCall.id)}"
+              ${canAuthorize ? "" : "disabled"}
+            >${busy && state.pendingAuthorizationOptionId === "allow" ? "Allowing..." : "Allow"}</button>
+            <button
+              class="permission-button reject"
+              id="reject-button"
+              type="button"
+              data-permission-action="reject"
+              data-tool-call-id="${escapeHtml(toolCall.id)}"
+              ${canAuthorize ? "" : "disabled"}
+            >${busy && state.pendingAuthorizationOptionId === "deny" ? "Rejecting..." : "Reject"}</button>
+          </div>
+        `;
       }
 
       function shouldAutoScroll() {
@@ -870,6 +1220,7 @@ pub fn default_client_html() -> &'static str {
 
       function renderActionButton() {
         const hasStop = commandAvailable("stop_run");
+        const hasPermissionRequest = Boolean(activePermissionToolCall());
         const canSend = commandAvailable("send_message") && !state.pendingSend;
         const attachmentsAllowed =
           state.pendingAttachments.length === 0 || attachmentUploadAvailable();
@@ -889,16 +1240,20 @@ pub fn default_client_html() -> &'static str {
 
         elements.actionButton.textContent = state.pendingSend ? "Sending..." : "Send";
         elements.actionButton.className = "action-button";
-        elements.actionButton.disabled = !sendReady;
-        elements.input.disabled = !commandAvailable("send_message");
-        elements.attachButton.disabled = !attachmentUploadAvailable() || state.pendingSend;
-        elements.input.placeholder = commandAvailable("send_message")
+        elements.actionButton.disabled = hasPermissionRequest || !sendReady;
+        elements.input.disabled = hasPermissionRequest || !commandAvailable("send_message");
+        elements.attachButton.disabled =
+          hasPermissionRequest || !attachmentUploadAvailable() || state.pendingSend;
+        elements.input.placeholder = hasPermissionRequest
+          ? "Respond to the permission request above."
+          : (commandAvailable("send_message")
           ? "Send a follow-up to the active Zed session"
-          : "This session is not ready for input";
+          : "This session is not ready for input");
       }
 
       function render() {
         const session = state.snapshot.session;
+        prunePermissionState();
 
         elements.sessionTitle.textContent = session ? session.title : "Waiting for a session";
         elements.sessionSubtitle.textContent = session
@@ -908,6 +1263,7 @@ pub fn default_client_html() -> &'static str {
         elements.connectionPill.className = `connection ${state.connectionState}`;
         elements.activityLine.textContent = activityText();
 
+        renderPermissionCard();
         renderMessages();
         renderSelectedAttachments();
         renderActionButton();
@@ -952,17 +1308,57 @@ pub fn default_client_html() -> &'static str {
           throw new Error(`Snapshot failed with status ${response.status}`);
         }
 
-        state.snapshot = await response.json();
+        applySnapshot(await response.json(), true);
         render();
+      }
+
+      async function loadOlderMessages() {
+        if (
+          state.loadingOlderMessages ||
+          !state.snapshot.has_more_messages_before ||
+          !state.snapshot.messages.length
+        ) {
+          return;
+        }
+
+        const beforeMessageId = state.snapshot.messages[0].id;
+        const previousScrollHeight = elements.messages.scrollHeight;
+        const previousScrollTop = elements.messages.scrollTop;
+
+        state.loadingOlderMessages = true;
+
+        try {
+          const response = await fetch(messagesPageUrl(beforeMessageId), { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`Messages page failed with status ${response.status}`);
+          }
+
+          const page = await response.json();
+          const existingIds = new Set(state.snapshot.messages.map(message => message.id));
+          const olderMessages = (page.messages || []).filter(message => !existingIds.has(message.id));
+
+          state.snapshot.messages = olderMessages.concat(state.snapshot.messages);
+          state.snapshot.has_more_messages_before = Boolean(page.has_more_before);
+          render();
+
+          const newScrollHeight = elements.messages.scrollHeight;
+          elements.messages.scrollTop =
+            newScrollHeight - previousScrollHeight + previousScrollTop;
+        } catch (error) {
+          setFeedback(`Failed to load older messages: ${error}`, "error");
+        } finally {
+          state.loadingOlderMessages = false;
+        }
       }
 
       function applyEvent(event) {
         switch (event.type) {
           case "snapshot_replaced":
-            state.snapshot = event.snapshot;
+            applySnapshot(event.snapshot, true);
             break;
           case "messages_changed":
-            state.snapshot.messages = event.messages;
+            state.snapshot.messages = mergeLatestMessages(event.messages);
+            state.snapshot.has_more_messages_before = Boolean(event.has_more_before);
             break;
           case "streaming_text_changed":
             state.snapshot.streaming_text = event.streaming_text;
@@ -1086,6 +1482,51 @@ pub fn default_client_html() -> &'static str {
         }
       }
 
+      async function authorizeToolCallOption(toolCallId, optionId, optionKind, successMessage) {
+        if (!authorizationAvailable()) {
+          return;
+        }
+
+        state.pendingAuthorization = true;
+        state.pendingAuthorizationOptionId = optionId;
+        state.pendingAuthorizationToolCallId = toolCallId;
+        render();
+
+        try {
+          await postCommand({
+            type: "authorize_tool_call",
+            tool_call_id: toolCallId,
+            option_id: optionId,
+            option_kind: optionKind
+          });
+          setFeedback(successMessage, "success");
+        } catch (error) {
+          state.pendingAuthorization = false;
+          state.pendingAuthorizationOptionId = null;
+          state.pendingAuthorizationToolCallId = null;
+          setFeedback(`Failed to respond to permission request: ${error}`, "error");
+          render();
+        }
+      }
+
+      async function authorizeToolCall(decision) {
+        const toolCall = activePermissionToolCall();
+        const choice = selectedPermissionChoice(toolCall);
+        if (!toolCall || !choice || !authorizationAvailable()) {
+          return;
+        }
+
+        const optionId = decision === "allow" ? choice.allow_option_id : choice.deny_option_id;
+        const optionKind = decision === "allow" ? choice.allow_option_kind : choice.deny_option_kind;
+
+        await authorizeToolCallOption(
+          toolCall.id,
+          optionId,
+          optionKind,
+          decision === "allow" ? "Permission granted." : "Permission rejected."
+        );
+      }
+
       async function handlePrimaryAction() {
         if (commandAvailable("stop_run")) {
           await stopRun();
@@ -1143,6 +1584,46 @@ pub fn default_client_html() -> &'static str {
 
         state.pendingAttachments.splice(index, 1);
         render();
+      });
+
+      elements.messages.addEventListener("scroll", () => {
+        if (elements.messages.scrollTop <= olderMessagesThreshold) {
+          loadOlderMessages();
+        }
+      });
+
+      elements.permissionCard.addEventListener("click", event => {
+        const optionButton = event.target.closest("[data-permission-option-id]");
+        if (optionButton) {
+          const toolCallId = optionButton.getAttribute("data-tool-call-id");
+          const optionId = optionButton.getAttribute("data-permission-option-id");
+          const optionKind = optionButton.getAttribute("data-permission-option-kind");
+          if (toolCallId && optionId && optionKind && !state.pendingAuthorization) {
+            authorizeToolCallOption(toolCallId, optionId, optionKind, "Decision sent.");
+          }
+          return;
+        }
+
+        const choiceButton = event.target.closest("[data-permission-choice-index]");
+        if (choiceButton) {
+          const toolCallId = choiceButton.getAttribute("data-tool-call-id");
+          const index = Number(choiceButton.getAttribute("data-permission-choice-index"));
+          if (toolCallId && Number.isFinite(index) && !state.pendingAuthorization) {
+            state.selectedPermissionChoiceIndices[toolCallId] = index;
+            render();
+          }
+          return;
+        }
+
+        const actionButton = event.target.closest("[data-permission-action]");
+        if (!actionButton) {
+          return;
+        }
+
+        const action = actionButton.getAttribute("data-permission-action");
+        if (action === "allow" || action === "reject") {
+          authorizeToolCall(action);
+        }
       });
 
       elements.input.addEventListener("keydown", event => {

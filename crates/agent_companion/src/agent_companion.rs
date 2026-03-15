@@ -18,8 +18,9 @@ use uuid::Uuid;
 pub use protocol::{
     CompanionAttachment, CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata,
     CompanionEvent, CompanionMessage, CompanionMessageRole, CompanionMessageStatus,
-    CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot, CompanionToolCall,
-    CompanionToolCallStatus, CompanionUpload,
+    CompanionMessagesPage, CompanionPermissionChoice, CompanionPermissionOption,
+    CompanionPermissionRequest, CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot,
+    CompanionToolCall, CompanionToolCallStatus, CompanionUpload,
 };
 pub use server::{CompanionServerHandle, CompanionServerStart, CompanionServerState};
 pub use session_mirror::{CompanionSessionMirror, CompanionSessionSource};
@@ -348,6 +349,17 @@ impl CompanionManager {
             CompanionCommand::SendMessage { text, attachments } => {
                 self.mirror
                     .update(cx, |mirror, cx| mirror.send_message(text, attachments, cx))
+                    .detach_and_log_err(cx);
+            }
+            CompanionCommand::AuthorizeToolCall {
+                tool_call_id,
+                option_id,
+                option_kind,
+            } => {
+                self.mirror
+                    .update(cx, |mirror, cx| {
+                        mirror.authorize_tool_call(tool_call_id, option_id, option_kind, cx)
+                    })
                     .detach_and_log_err(cx);
             }
             CompanionCommand::StopRun => {

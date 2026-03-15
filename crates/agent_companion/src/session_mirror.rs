@@ -1,4 +1,6 @@
-use acp_thread::{AcpThread, AcpThreadEvent, AgentThreadEntry, ThreadStatus, ToolCallStatus};
+use acp_thread::{
+    AcpThread, AcpThreadEvent, AgentThreadEntry, PermissionOptions, ThreadStatus, ToolCallStatus,
+};
 use agent_client_protocol as acp;
 use anyhow::{Result, anyhow};
 use assistant_text_thread::{
@@ -15,8 +17,10 @@ use uuid::Uuid;
 use crate::{
     CompanionAsset, CompanionAssetDisposition, CompanionAssetSource, CompanionAttachment,
     CompanionCommandKind, CompanionConnectionMetadata, CompanionEvent, CompanionMessage,
-    CompanionMessageRole, CompanionMessageStatus, CompanionRunStatus, CompanionSessionSummary,
-    CompanionSnapshot, CompanionToolCall, CompanionToolCallStatus, CompanionUpload,
+    CompanionMessageRole, CompanionMessageStatus, CompanionPermissionChoice,
+    CompanionPermissionOption, CompanionPermissionRequest, CompanionRunStatus,
+    CompanionSessionSummary, CompanionSnapshot, CompanionToolCall, CompanionToolCallStatus,
+    CompanionUpload,
 };
 
 #[derive(Clone)]
@@ -192,6 +196,7 @@ impl CompanionSessionMirror {
         if self.snapshot.messages != new_snapshot.messages {
             cx.emit(CompanionEvent::MessagesChanged {
                 messages: new_snapshot.messages.clone(),
+                has_more_before: new_snapshot.has_more_messages_before,
             });
         }
         if self.snapshot.streaming_text != new_snapshot.streaming_text {
@@ -227,6 +232,53 @@ impl CompanionSessionMirror {
             CompanionSessionSource::TextThread(thread) => {
                 state_for_text_thread(thread.read(cx), self.connection.clone(), cx)
             }
+        }
+    }
+
+    pub fn authorize_tool_call(
+        &mut self,
+        tool_call_id: String,
+        option_id: String,
+        option_kind: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let Some(source) = self.source.clone() else {
+            return Task::ready(Err(anyhow!("no active companion session")));
+        };
+
+        let option_kind = match permission_option_kind_from_name(&option_kind) {
+            Some(kind) => kind,
+            None => {
+                return Task::ready(Err(anyhow!(
+                    "unknown permission option kind: {option_kind}"
+                )));
+            }
+        };
+
+        match source {
+            CompanionSessionSource::AcpThread(thread) => {
+                let tool_call_id = acp::ToolCallId::new(tool_call_id);
+                let option_id = acp::PermissionOptionId::new(option_id);
+                let result = thread.update(cx, |thread, cx| {
+                    let Some((_, tool_call)) = thread.tool_call(&tool_call_id) else {
+                        return Err(anyhow!("tool call no longer exists"));
+                    };
+
+                    if !matches!(
+                        tool_call.status,
+                        ToolCallStatus::WaitingForConfirmation { .. }
+                    ) {
+                        return Err(anyhow!("tool call is no longer waiting for confirmation"));
+                    }
+
+                    thread.authorize_tool_call(tool_call_id, option_id, option_kind, cx);
+                    Ok(())
+                });
+                Task::ready(result)
+            }
+            CompanionSessionSource::TextThread(_) => Task::ready(Err(anyhow!(
+                "text thread companion authorization is not supported"
+            ))),
         }
     }
 }
@@ -278,6 +330,7 @@ fn empty_state(connection: CompanionConnectionMetadata) -> CompanionMirrorState 
             session: None,
             connection,
             messages: Vec::new(),
+            has_more_messages_before: false,
             streaming_text: None,
             tool_calls: Vec::new(),
             run_status: CompanionRunStatus::Idle,
@@ -350,6 +403,9 @@ fn state_for_acp_thread(
                 title: tool_call.label.read(cx).source().to_string(),
                 summary: tool_call.tool_name.as_ref().map(ToString::to_string),
                 status: map_acp_tool_call_status(&tool_call.status),
+                permission_request: companion_permission_request_for_tool_call_status(
+                    &tool_call.status,
+                ),
                 output_preview: tool_call_output_preview(tool_call, cx),
                 started_at_unix_ms: None,
                 finished_at_unix_ms: None,
@@ -372,6 +428,7 @@ fn state_for_acp_thread(
             }),
             connection,
             messages,
+            has_more_messages_before: false,
             streaming_text,
             tool_calls,
             run_status: map_acp_run_status(thread),
@@ -412,6 +469,7 @@ fn state_for_text_thread(
             }),
             connection,
             messages,
+            has_more_messages_before: false,
             streaming_text,
             tool_calls: Vec::new(),
             run_status: map_text_run_status(thread, cx),
@@ -480,13 +538,88 @@ fn available_commands_for_text_thread(thread: &TextThread, cx: &App) -> Vec<Comp
 
 fn map_acp_tool_call_status(status: &ToolCallStatus) -> CompanionToolCallStatus {
     match status {
-        ToolCallStatus::Pending | ToolCallStatus::WaitingForConfirmation { .. } => {
-            CompanionToolCallStatus::Pending
+        ToolCallStatus::Pending => CompanionToolCallStatus::Pending,
+        ToolCallStatus::WaitingForConfirmation { .. } => {
+            CompanionToolCallStatus::WaitingForConfirmation
         }
         ToolCallStatus::InProgress => CompanionToolCallStatus::Running,
         ToolCallStatus::Completed => CompanionToolCallStatus::Succeeded,
         ToolCallStatus::Failed | ToolCallStatus::Rejected => CompanionToolCallStatus::Failed,
         ToolCallStatus::Canceled => CompanionToolCallStatus::Canceled,
+    }
+}
+
+fn companion_permission_request_for_tool_call_status(
+    status: &ToolCallStatus,
+) -> Option<CompanionPermissionRequest> {
+    let ToolCallStatus::WaitingForConfirmation { options, .. } = status else {
+        return None;
+    };
+
+    companion_permission_request_for_options(options)
+}
+
+fn companion_permission_request_for_options(
+    options: &PermissionOptions,
+) -> Option<CompanionPermissionRequest> {
+    match options {
+        PermissionOptions::Dropdown(choices) => {
+            let choices = choices
+                .iter()
+                .map(|choice| CompanionPermissionChoice {
+                    label: choice.label().to_string(),
+                    allow_option_id: choice.allow.option_id.0.to_string(),
+                    allow_option_kind: permission_option_kind_name(choice.allow.kind).to_string(),
+                    deny_option_id: choice.deny.option_id.0.to_string(),
+                    deny_option_kind: permission_option_kind_name(choice.deny.kind).to_string(),
+                })
+                .collect::<Vec<_>>();
+
+            if choices.is_empty() {
+                return None;
+            }
+
+            Some(CompanionPermissionRequest::Dropdown {
+                default_choice_index: choices.len().saturating_sub(1),
+                choices,
+            })
+        }
+        PermissionOptions::Flat(options) => {
+            let options = options
+                .iter()
+                .map(|option| CompanionPermissionOption {
+                    label: option.name.to_string(),
+                    option_id: option.option_id.0.to_string(),
+                    option_kind: permission_option_kind_name(option.kind).to_string(),
+                })
+                .collect::<Vec<_>>();
+
+            if options.is_empty() {
+                return None;
+            }
+
+            Some(CompanionPermissionRequest::Flat { options })
+        }
+    }
+}
+
+fn permission_option_kind_name(kind: acp::PermissionOptionKind) -> &'static str {
+    match kind {
+        acp::PermissionOptionKind::AllowOnce => "AllowOnce",
+        acp::PermissionOptionKind::AllowAlways => "AllowAlways",
+        acp::PermissionOptionKind::RejectOnce => "RejectOnce",
+        acp::PermissionOptionKind::RejectAlways => "RejectAlways",
+        _ => "AllowOnce",
+    }
+}
+
+fn permission_option_kind_from_name(name: &str) -> Option<acp::PermissionOptionKind> {
+    match name {
+        "AllowOnce" => Some(acp::PermissionOptionKind::AllowOnce),
+        "AllowAlways" => Some(acp::PermissionOptionKind::AllowAlways),
+        "RejectOnce" => Some(acp::PermissionOptionKind::RejectOnce),
+        "RejectAlways" => Some(acp::PermissionOptionKind::RejectAlways),
+        _ => None,
     }
 }
 
@@ -526,6 +659,9 @@ fn available_commands_for_acp_thread(thread: &AcpThread) -> Vec<CompanionCommand
         CompanionCommandKind::SendMessage,
         CompanionCommandKind::SendAttachments,
     ];
+    if thread.is_waiting_for_confirmation() {
+        commands.push(CompanionCommandKind::AuthorizeToolCall);
+    }
     if thread.status() == ThreadStatus::Generating {
         commands.push(CompanionCommandKind::StopRun);
     }
@@ -1182,12 +1318,13 @@ mod tests {
 
     use super::{
         CompanionSessionMirror, CompanionSessionSource, ResourceBlockFallback,
-        companion_content_from_acp_blocks, empty_state, extract_local_markdown_attachments,
-        streaming_text_for_messages, truncate_preview,
+        companion_content_from_acp_blocks, companion_permission_request_for_options, empty_state,
+        extract_local_markdown_attachments, streaming_text_for_messages, truncate_preview,
     };
     use crate::{
         CompanionAttachment, CompanionConnectionMetadata, CompanionEvent, CompanionMessage,
-        CompanionMessageRole, CompanionMessageStatus, CompanionRunStatus,
+        CompanionMessageRole, CompanionMessageStatus, CompanionPermissionRequest,
+        CompanionRunStatus,
     };
 
     #[gpui::test]
@@ -1368,5 +1505,90 @@ mod tests {
         ));
         assert_eq!(extracted.assets.len(), 1);
         assert_eq!(attachment_index, 1);
+    }
+
+    #[test]
+    fn dropdown_permission_options_become_companion_request() {
+        let options = acp_thread::PermissionOptions::Dropdown(vec![
+            acp_thread::PermissionOptionChoice {
+                allow: agent_client_protocol::PermissionOption::new(
+                    "always_allow:terminal",
+                    "Always allow terminal",
+                    agent_client_protocol::PermissionOptionKind::AllowAlways,
+                ),
+                deny: agent_client_protocol::PermissionOption::new(
+                    "always_deny:terminal",
+                    "Always deny terminal",
+                    agent_client_protocol::PermissionOptionKind::RejectAlways,
+                ),
+            },
+            acp_thread::PermissionOptionChoice {
+                allow: agent_client_protocol::PermissionOption::new(
+                    "allow",
+                    "Allow",
+                    agent_client_protocol::PermissionOptionKind::AllowOnce,
+                ),
+                deny: agent_client_protocol::PermissionOption::new(
+                    "deny",
+                    "Deny",
+                    agent_client_protocol::PermissionOptionKind::RejectOnce,
+                ),
+            },
+        ]);
+
+        let request =
+            companion_permission_request_for_options(&options).expect("permission request");
+
+        let CompanionPermissionRequest::Dropdown {
+            default_choice_index,
+            choices,
+        } = request
+        else {
+            panic!("expected dropdown permission request");
+        };
+
+        assert_eq!(default_choice_index, 1);
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].label, "Always allow terminal");
+        assert_eq!(choices[0].allow_option_kind, "AllowAlways");
+        assert_eq!(choices[1].label, "Allow");
+        assert_eq!(choices[1].deny_option_kind, "RejectOnce");
+    }
+
+    #[test]
+    fn flat_permission_options_preserve_exact_button_labels() {
+        let options = acp_thread::PermissionOptions::Flat(vec![
+            agent_client_protocol::PermissionOption::new(
+                "approve",
+                "Yes, proceed",
+                agent_client_protocol::PermissionOptionKind::AllowOnce,
+            ),
+            agent_client_protocol::PermissionOption::new(
+                "approve_amendment",
+                "Yes, and don't ask again",
+                agent_client_protocol::PermissionOptionKind::AllowAlways,
+            ),
+            agent_client_protocol::PermissionOption::new(
+                "abort",
+                "No, and tell Codex what to do differently",
+                agent_client_protocol::PermissionOptionKind::RejectOnce,
+            ),
+        ]);
+
+        let request =
+            companion_permission_request_for_options(&options).expect("permission request");
+
+        let CompanionPermissionRequest::Flat { options } = request else {
+            panic!("expected flat permission request");
+        };
+
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].label, "Yes, proceed");
+        assert_eq!(options[0].option_id, "approve");
+        assert_eq!(options[1].option_kind, "AllowAlways");
+        assert_eq!(
+            options[2].label,
+            "No, and tell Codex what to do differently"
+        );
     }
 }

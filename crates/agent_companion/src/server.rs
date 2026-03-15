@@ -29,10 +29,12 @@ use tokio::{
 use crate::static_client;
 use crate::{
     CompanionAsset, CompanionAssetDisposition, CompanionAssetSource, CompanionCommand,
-    CompanionEvent, CompanionSnapshot,
+    CompanionEvent, CompanionMessage, CompanionMessagesPage, CompanionSnapshot,
 };
 
 const COMMAND_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+const MESSAGE_PAGE_SIZE: usize = 40;
+const MAX_MESSAGE_PAGE_SIZE: usize = 100;
 
 #[derive(Clone)]
 pub struct CompanionServerState {
@@ -91,6 +93,15 @@ impl CompanionServerHandle {
 #[derive(serde::Deserialize)]
 struct CompanionAuthQuery {
     token: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CompanionMessagesQuery {
+    token: String,
+    #[serde(default)]
+    before_message_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 pub async fn start_server(
@@ -175,6 +186,7 @@ fn router(state: CompanionServerState) -> Router {
     Router::new()
         .route("/companion", get(companion_client))
         .route("/companion/snapshot", get(companion_snapshot))
+        .route("/companion/messages", get(companion_messages))
         .route("/companion/events", get(companion_events))
         .route("/companion/assets/:asset_id", get(companion_asset))
         .route(
@@ -197,7 +209,30 @@ async fn companion_snapshot(
     Query(query): Query<CompanionAuthQuery>,
 ) -> Result<Json<CompanionSnapshot>, StatusCode> {
     authorize(&state, &query)?;
-    Ok(Json(state.snapshot_rx.borrow().clone()))
+    Ok(Json(windowed_snapshot(&state.snapshot_rx.borrow())))
+}
+
+async fn companion_messages(
+    State(state): State<CompanionServerState>,
+    Query(query): Query<CompanionMessagesQuery>,
+) -> Result<Json<CompanionMessagesPage>, StatusCode> {
+    authorize(
+        &state,
+        &CompanionAuthQuery {
+            token: query.token.clone(),
+        },
+    )?;
+    let limit = query
+        .limit
+        .unwrap_or(MESSAGE_PAGE_SIZE)
+        .min(MAX_MESSAGE_PAGE_SIZE)
+        .max(1);
+    let page = message_page(
+        &state.snapshot_rx.borrow().messages,
+        query.before_message_id.as_deref(),
+        limit,
+    );
+    Ok(Json(page))
 }
 
 async fn companion_command(
@@ -271,6 +306,7 @@ async fn stream_events(mut socket: WebSocket, state: CompanionServerState) {
     loop {
         match receiver.recv().await {
             Ok(event) => {
+                let event = windowed_event(&event, &state.snapshot_rx.borrow());
                 let Ok(payload) = serde_json::to_string(&event) else {
                     break;
                 };
@@ -289,6 +325,50 @@ fn authorize(state: &CompanionServerState, query: &CompanionAuthQuery) -> Result
         Ok(())
     } else {
         Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+fn windowed_snapshot(snapshot: &CompanionSnapshot) -> CompanionSnapshot {
+    let mut snapshot = snapshot.clone();
+    let page = message_page(&snapshot.messages, None, MESSAGE_PAGE_SIZE);
+    snapshot.messages = page.messages;
+    snapshot.has_more_messages_before = page.has_more_before;
+    snapshot
+}
+
+fn windowed_event(event: &CompanionEvent, snapshot: &CompanionSnapshot) -> CompanionEvent {
+    match event {
+        CompanionEvent::SnapshotReplaced { snapshot } => CompanionEvent::SnapshotReplaced {
+            snapshot: windowed_snapshot(snapshot),
+        },
+        CompanionEvent::MessagesChanged { .. } => {
+            let page = message_page(&snapshot.messages, None, MESSAGE_PAGE_SIZE);
+            CompanionEvent::MessagesChanged {
+                messages: page.messages,
+                has_more_before: page.has_more_before,
+            }
+        }
+        _ => event.clone(),
+    }
+}
+
+fn message_page(
+    messages: &[CompanionMessage],
+    before_message_id: Option<&str>,
+    limit: usize,
+) -> CompanionMessagesPage {
+    let end = before_message_id
+        .and_then(|before_message_id| {
+            messages
+                .iter()
+                .position(|message| message.id == before_message_id)
+        })
+        .unwrap_or(messages.len());
+    let start = end.saturating_sub(limit);
+
+    CompanionMessagesPage {
+        messages: messages[start..end].to_vec(),
+        has_more_before: start > 0,
     }
 }
 
@@ -343,7 +423,9 @@ mod tests {
     use super::{CompanionServerState, default_client_html, router};
     use crate::{
         CompanionAsset, CompanionAssetDisposition, CompanionAssetSource, CompanionCommand,
-        CompanionConnectionMetadata, CompanionRunStatus, CompanionSnapshot, CompanionUpload,
+        CompanionConnectionMetadata, CompanionMessage, CompanionMessageRole,
+        CompanionMessageStatus, CompanionMessagesPage, CompanionRunStatus, CompanionSnapshot,
+        CompanionUpload,
     };
 
     fn test_state() -> (
@@ -359,6 +441,7 @@ mod tests {
                 expires_at_unix_ms: None,
             },
             messages: Vec::new(),
+            has_more_messages_before: false,
             streaming_text: None,
             tool_calls: Vec::new(),
             run_status: CompanionRunStatus::Idle,
@@ -419,6 +502,9 @@ mod tests {
         assert!(html.contains("Live view of the active Zed thread."));
         assert!(html.contains("id=\"action-button\""));
         assert!(html.contains("message-attachments"));
+        assert!(html.contains("id=\"permission-card\""));
+        assert!(html.contains("id=\"allow-button\""));
+        assert!(html.contains("id=\"reject-button\""));
     }
 
     #[tokio::test]
@@ -440,6 +526,61 @@ mod tests {
         let snapshot: CompanionSnapshot = serde_json::from_slice(&body).expect("snapshot");
         assert_eq!(snapshot.connection.token_id, "test-token");
         assert_eq!(snapshot.run_status, CompanionRunStatus::Idle);
+        assert!(!snapshot.has_more_messages_before);
+    }
+
+    #[tokio::test]
+    async fn messages_route_returns_older_page() {
+        let (state, _) = test_state();
+        let messages = (0..45)
+            .map(|index| CompanionMessage {
+                id: format!("message-{index}"),
+                role: CompanionMessageRole::Assistant,
+                status: CompanionMessageStatus::Done,
+                text: format!("message {index}"),
+                attachments: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let snapshot = CompanionSnapshot {
+            protocol_version: 1,
+            session: None,
+            connection: CompanionConnectionMetadata {
+                token_id: "test-token".into(),
+                issued_at_unix_ms: None,
+                expires_at_unix_ms: None,
+            },
+            messages,
+            has_more_messages_before: false,
+            streaming_text: None,
+            tool_calls: Vec::new(),
+            run_status: CompanionRunStatus::Completed,
+            available_commands: Vec::new(),
+        };
+        let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
+        let _snapshot_tx = snapshot_tx;
+        let state = CompanionServerState {
+            snapshot_rx,
+            ..state
+        };
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/companion/messages?token=test-token&before_message_id=message-40")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body()).await.expect("body");
+        let page: CompanionMessagesPage = serde_json::from_slice(&body).expect("messages page");
+        assert_eq!(page.messages.len(), 40);
+        assert_eq!(page.messages[0].id, "message-0");
+        assert_eq!(page.messages[39].id, "message-39");
+        assert!(!page.has_more_before);
     }
 
     #[tokio::test]
@@ -471,6 +612,41 @@ mod tests {
             CompanionCommand::SendMessage {
                 text: "hello from mobile".into(),
                 attachments: Vec::new(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn command_route_forwards_authorize_payload() {
+        let (state, mut command_rx) = test_state();
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/companion/command?token=test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&CompanionCommand::AuthorizeToolCall {
+                            tool_call_id: "tool-1".into(),
+                            option_id: "allow".into(),
+                            option_kind: "AllowOnce".into(),
+                        })
+                        .expect("json"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let command = command_rx.next().await.expect("command");
+        assert_eq!(
+            command,
+            CompanionCommand::AuthorizeToolCall {
+                tool_call_id: "tool-1".into(),
+                option_id: "allow".into(),
+                option_kind: "AllowOnce".into(),
             }
         );
     }
