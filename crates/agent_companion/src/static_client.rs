@@ -153,6 +153,51 @@ pub fn default_client_html() -> &'static str {
       display: none;
     }
 
+    .modal-scrim {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(3, 6, 14, 0.72);
+      backdrop-filter: blur(8px);
+      z-index: 40;
+    }
+
+    .modal-scrim.hidden {
+      display: none;
+    }
+
+    .modal-card {
+      display: grid;
+      gap: 12px;
+      width: min(100%, 360px);
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(24, 26, 34, 0.98);
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.42);
+    }
+
+    .modal-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-strong);
+    }
+
+    .modal-copy {
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-soft);
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
     .connection-log-empty {
       font-size: 12px;
       line-height: 1.45;
@@ -666,6 +711,50 @@ pub fn default_client_html() -> &'static str {
       object-fit: contain;
     }
 
+    .inline-image-gallery {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(180px, min(76vw, 240px));
+      gap: 10px;
+      overflow-x: auto;
+      margin: 0.75em 0;
+      padding-bottom: 2px;
+      overscroll-behavior-x: contain;
+      scrollbar-width: thin;
+    }
+
+    .inline-image-item {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 176px;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.03);
+      overflow: hidden;
+    }
+
+    .inline-image-item img {
+      width: 100%;
+      height: 100%;
+      max-height: none;
+      margin-top: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      object-fit: contain;
+    }
+
+    .inline-image-item .asset-unavailable {
+      width: 100%;
+      height: 100%;
+      align-content: start;
+      border: 0;
+      border-radius: 0;
+      background: rgba(255, 181, 77, 0.12);
+    }
+
     .asset-unavailable {
       display: grid;
       gap: 6px;
@@ -1021,9 +1110,22 @@ pub fn default_client_html() -> &'static str {
       </div>
     </form>
   </main>
+  <div class="modal-scrim hidden" id="reconnect-modal" role="dialog" aria-modal="true" aria-labelledby="reconnect-modal-title">
+    <div class="modal-card">
+      <div class="modal-title" id="reconnect-modal-title">Connection lost</div>
+      <div class="modal-copy">Mobile Companion could not reconnect after several attempts. Try reconnecting manually.</div>
+      <div class="modal-actions">
+        <button class="secondary-button" id="reconnect-dismiss-button" type="button">Dismiss</button>
+        <button class="action-button" id="reconnect-retry-button" type="button">Retry</button>
+      </div>
+    </div>
+  </div>
 
   <script>
     (() => {
+      const reconnectAttemptLimit = 5;
+      const reconnectDelayMs = 1500;
+
       const state = {
         snapshot: {
           session: null,
@@ -1051,7 +1153,12 @@ pub fn default_client_html() -> &'static str {
         socket: null,
         forceScrollToBottom: true,
         isPinnedToBottom: true,
-        scrollToBottomFrame: null
+        scrollToBottomFrame: null,
+        pendingAnimatedScroll: false,
+        reconnectAttempts: 0,
+        reconnectTimer: null,
+        reconnectModalOpen: false,
+        reconnectInFlight: false
       };
 
       const elements = {
@@ -1066,7 +1173,10 @@ pub fn default_client_html() -> &'static str {
         selectedAttachments: document.getElementById("selected-attachments"),
         attachButton: document.getElementById("attach-button"),
         actionButton: document.getElementById("action-button"),
-        connectionLog: document.getElementById("connection-log")
+        connectionLog: document.getElementById("connection-log"),
+        reconnectModal: document.getElementById("reconnect-modal"),
+        reconnectRetryButton: document.getElementById("reconnect-retry-button"),
+        reconnectDismissButton: document.getElementById("reconnect-dismiss-button")
       };
 
       const maxAttachmentBytes = 10 * 1024 * 1024;
@@ -1453,8 +1563,11 @@ pub fn default_client_html() -> &'static str {
         return state.forceScrollToBottom || state.isPinnedToBottom;
       }
 
-      function scrollMessagesToBottom() {
-        elements.messages.scrollTop = elements.messages.scrollHeight;
+      function scrollMessagesToBottom(animated = false) {
+        elements.messages.scrollTo({
+          top: elements.messages.scrollHeight,
+          behavior: animated ? "smooth" : "auto"
+        });
       }
 
       function distanceFromBottom() {
@@ -1466,10 +1579,10 @@ pub fn default_client_html() -> &'static str {
       }
 
       function updatePinnedToBottom() {
-        state.isPinnedToBottom = distanceFromBottom() <= 64;
+        state.isPinnedToBottom = distanceFromBottom() <= 24;
       }
 
-      function scheduleScrollToBottom() {
+      function scheduleScrollToBottom(animated = false) {
         if (state.scrollToBottomFrame !== null) {
           window.cancelAnimationFrame(state.scrollToBottomFrame);
         }
@@ -1477,15 +1590,85 @@ pub fn default_client_html() -> &'static str {
         state.scrollToBottomFrame = window.requestAnimationFrame(() => {
           state.scrollToBottomFrame = window.requestAnimationFrame(() => {
             state.scrollToBottomFrame = null;
-            scrollMessagesToBottom();
+            scrollMessagesToBottom(animated);
             state.forceScrollToBottom = false;
+            state.pendingAnimatedScroll = false;
             state.isPinnedToBottom = true;
           });
         });
       }
 
+      function imageNodesFromMarkdownBlock(node) {
+        if (!(node instanceof HTMLElement) || node.tagName !== "P") {
+          return [];
+        }
+
+        const images = [];
+        for (const child of Array.from(node.childNodes)) {
+          if (child instanceof HTMLImageElement) {
+            images.push(child);
+            continue;
+          }
+
+          if (child instanceof HTMLBRElement) {
+            continue;
+          }
+
+          if (child.nodeType === Node.TEXT_NODE && child.textContent.trim().length === 0) {
+            continue;
+          }
+
+          return [];
+        }
+
+        return images;
+      }
+
+      function upgradeInlineImageGalleries() {
+        elements.messages.querySelectorAll(".message-body.markdown").forEach(body => {
+          const blocks = Array.from(body.children);
+          let imageRun = [];
+
+          function flushImageRun() {
+            if (!imageRun.length) {
+              return;
+            }
+
+            const gallery = document.createElement("div");
+            gallery.className = "inline-image-gallery";
+
+            for (const entry of imageRun) {
+              for (const image of entry.images) {
+                image.loading = "lazy";
+
+                const item = document.createElement("div");
+                item.className = "inline-image-item";
+                item.appendChild(image);
+                gallery.appendChild(item);
+              }
+            }
+
+            imageRun[0].block.before(gallery);
+            imageRun.forEach(entry => entry.block.remove());
+            imageRun = [];
+          }
+
+          for (const block of blocks) {
+            const images = imageNodesFromMarkdownBlock(block);
+            if (images.length) {
+              imageRun.push({ block, images });
+              continue;
+            }
+
+            flushImageRun();
+          }
+
+          flushImageRun();
+        });
+      }
+
       function bindTimelineMediaEvents() {
-        elements.messages.querySelectorAll(".message-body img, .attachment-image img").forEach(image => {
+        elements.messages.querySelectorAll(".message-body img, .attachment-image img, .inline-image-item img").forEach(image => {
           if (image.dataset.assetEventsBound === "true") {
             return;
           }
@@ -1563,9 +1746,14 @@ pub fn default_client_html() -> &'static str {
         const status = await assetRequestStatus(src);
         const fileName = image.getAttribute("alt") || "This file";
         const notice = assetUnavailableNoticeNode(status, fileName);
-        const imageCard = image.closest(".attachment-image");
+        const imageCard = image.closest(".inline-image-item, .attachment-image");
         if (imageCard) {
-          imageCard.replaceWith(notice);
+          if (imageCard.classList.contains("inline-image-item")) {
+            imageCard.innerHTML = "";
+            imageCard.appendChild(notice);
+          } else {
+            imageCard.replaceWith(notice);
+          }
           return;
         }
 
@@ -1634,40 +1822,57 @@ pub fn default_client_html() -> &'static str {
           return "";
         }
 
+        const imageAttachments = attachments.filter(attachment => attachment.type === "image");
+        const otherAttachments = attachments.filter(attachment => attachment.type !== "image");
+
+        const imageGallery = imageAttachments.length
+          ? `
+            <div class="inline-image-gallery">
+              ${imageAttachments.map(attachment => `
+                <a
+                  class="inline-image-item attachment-image"
+                  href="${escapeHtml(assetUrl(attachment.asset_id))}"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <img src="${escapeHtml(assetUrl(attachment.asset_id))}" alt="${escapeHtml(attachment.name)}" loading="lazy">
+                </a>
+              `).join("")}
+            </div>
+          `
+          : "";
+
+        const otherAttachmentMarkup = otherAttachments.map(attachment => {
+          switch (attachment.type) {
+            case "file":
+              return `
+                <div class="attachment-file">
+                  <div class="attachment-title">${escapeHtml(attachment.name)}</div>
+                  ${attachment.mime_type ? `<div class="attachment-meta">${escapeHtml(attachment.mime_type)}</div>` : ""}
+                  <div class="attachment-actions">
+                    <a class="attachment-action" href="${escapeHtml(assetUrl(attachment.asset_id))}" target="_blank" rel="noreferrer">Open</a>
+                    <a class="attachment-action secondary" href="${escapeHtml(assetUrl(attachment.asset_id))}" download="${escapeHtml(attachment.name)}">Download</a>
+                  </div>
+                </div>
+              `;
+            case "link":
+              return `
+                <div class="attachment-link">
+                  <div class="attachment-title">${escapeHtml(attachment.name)}</div>
+                  <div class="attachment-actions">
+                    <a class="attachment-action" href="${escapeHtml(attachment.url)}" target="_blank" rel="noreferrer">Open link</a>
+                  </div>
+                </div>
+              `;
+            default:
+              return "";
+          }
+        }).join("");
+
         return `
           <div class="message-attachments">
-            ${attachments.map(attachment => {
-              switch (attachment.type) {
-                case "image":
-                  return `
-                    <a class="attachment-image" href="${escapeHtml(assetUrl(attachment.asset_id))}" target="_blank" rel="noreferrer">
-                      <img src="${escapeHtml(assetUrl(attachment.asset_id))}" alt="${escapeHtml(attachment.name)}" loading="lazy">
-                    </a>
-                  `;
-                case "file":
-                  return `
-                    <div class="attachment-file">
-                      <div class="attachment-title">${escapeHtml(attachment.name)}</div>
-                      ${attachment.mime_type ? `<div class="attachment-meta">${escapeHtml(attachment.mime_type)}</div>` : ""}
-                      <div class="attachment-actions">
-                        <a class="attachment-action" href="${escapeHtml(assetUrl(attachment.asset_id))}" target="_blank" rel="noreferrer">Open</a>
-                        <a class="attachment-action secondary" href="${escapeHtml(assetUrl(attachment.asset_id))}" download="${escapeHtml(attachment.name)}">Download</a>
-                      </div>
-                    </div>
-                  `;
-                case "link":
-                  return `
-                    <div class="attachment-link">
-                      <div class="attachment-title">${escapeHtml(attachment.name)}</div>
-                      <div class="attachment-actions">
-                        <a class="attachment-action" href="${escapeHtml(attachment.url)}" target="_blank" rel="noreferrer">Open link</a>
-                      </div>
-                    </div>
-                  `;
-                default:
-                  return "";
-              }
-            }).join("")}
+            ${imageGallery}
+            ${otherAttachmentMarkup}
           </div>
         `;
       }
@@ -1904,12 +2109,14 @@ pub fn default_client_html() -> &'static str {
           link.setAttribute("rel", "noreferrer");
         });
 
+        upgradeInlineImageGalleries();
         bindTimelineMediaEvents();
 
         if (shouldStick) {
-          scheduleScrollToBottom();
+          scheduleScrollToBottom(state.pendingAnimatedScroll);
         } else {
           state.forceScrollToBottom = false;
+          state.pendingAnimatedScroll = false;
         }
       }
 
@@ -1956,6 +2163,9 @@ pub fn default_client_html() -> &'static str {
         elements.activityLine.textContent = activityText();
         elements.activityLine.className = showActivityLine() ? "activity" : "activity hidden";
         elements.composerForm.style.display = session && isReadOnlyMode() ? "none" : "";
+        elements.reconnectModal.className = state.reconnectModalOpen ? "modal-scrim" : "modal-scrim hidden";
+        elements.reconnectRetryButton.disabled = state.reconnectInFlight;
+        elements.reconnectRetryButton.textContent = state.reconnectInFlight ? "Retrying..." : "Retry";
 
         renderPermissionCard();
         renderTimeline();
@@ -2047,6 +2257,8 @@ pub fn default_client_html() -> &'static str {
       }
 
       function applyEvent(event) {
+        const shouldStick = shouldAutoScroll();
+
         switch (event.type) {
           case "snapshot_replaced":
             applySnapshot(event.snapshot, true);
@@ -2068,7 +2280,8 @@ pub fn default_client_html() -> &'static str {
             break;
         }
 
-        state.forceScrollToBottom = true;
+        state.forceScrollToBottom = shouldStick;
+        state.pendingAnimatedScroll = false;
         render();
       }
 
@@ -2080,11 +2293,18 @@ pub fn default_client_html() -> &'static str {
           return;
         }
 
-        if (state.socket) {
-          state.socket.close();
+        if (state.reconnectTimer !== null) {
+          window.clearTimeout(state.reconnectTimer);
+          state.reconnectTimer = null;
         }
 
-        state.connectionState = "connecting";
+        if (state.socket) {
+          const previousSocket = state.socket;
+          state.socket = null;
+          previousSocket.close();
+        }
+
+        state.connectionState = state.reconnectAttempts > 0 ? "reconnecting" : "connecting";
         render();
 
         const socket = new WebSocket(websocketUrl());
@@ -2097,6 +2317,12 @@ pub fn default_client_html() -> &'static str {
           }
 
           state.connectionState = "connected";
+          state.reconnectAttempts = 0;
+          state.reconnectModalOpen = false;
+          state.reconnectInFlight = false;
+          loadSnapshot().catch(error => {
+            pushEvent(`Reconnect snapshot failed: ${error}`, "error");
+          });
           render();
         });
 
@@ -2122,17 +2348,32 @@ pub fn default_client_html() -> &'static str {
             return;
           }
 
+          state.socket = null;
+
+          if (state.reconnectAttempts >= reconnectAttemptLimit) {
+            state.connectionState = "error";
+            state.reconnectModalOpen = true;
+            state.reconnectInFlight = false;
+            pushEvent("Connection lost. Retry manually.", "error");
+            render();
+            return;
+          }
+
+          state.reconnectAttempts += 1;
           state.connectionState = "reconnecting";
           render();
-          window.setTimeout(async () => {
-            try {
-              await loadSnapshot();
-            } catch (error) {
-              pushEvent(`Reconnect snapshot failed: ${error}`, "error");
-            }
+          state.reconnectTimer = window.setTimeout(() => {
+            state.reconnectTimer = null;
             connectSocket();
-          }, 1500);
+          }, reconnectDelayMs);
         });
+      }
+
+      function retryConnection() {
+        state.reconnectAttempts = 0;
+        state.reconnectModalOpen = false;
+        state.reconnectInFlight = true;
+        connectSocket();
       }
 
       async function sendMessage() {
@@ -2156,6 +2397,7 @@ pub fn default_client_html() -> &'static str {
           elements.attachmentInput.value = "";
           state.forceScrollToBottom = true;
           state.isPinnedToBottom = true;
+          state.pendingAnimatedScroll = true;
           pushEvent("Message sent to the active Zed session.", "success");
         } catch (error) {
           pushEvent(`Failed to send message: ${error}`, "error");
@@ -2315,6 +2557,16 @@ pub fn default_client_html() -> &'static str {
         event.stopPropagation();
         state.eventLogOpen = !state.eventLogOpen;
         renderConnectionLog();
+      });
+
+      elements.reconnectRetryButton.addEventListener("click", () => {
+        retryConnection();
+      });
+
+      elements.reconnectDismissButton.addEventListener("click", () => {
+        state.reconnectModalOpen = false;
+        state.reconnectInFlight = false;
+        render();
       });
 
       document.addEventListener("click", event => {
