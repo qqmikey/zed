@@ -153,6 +153,24 @@ You can choose between `thread` (the default) and `text_thread`:
 }
 ```
 
+### Mobile Companion
+
+Use the `agent.mobile_companion` settings to control whether the companion service starts with Zed and whether it follows the active agent session by default:
+
+```json [settings]
+{
+  "agent": {
+    "mobile_companion": {
+      "auto_start": true,
+      "follow_active_session": true
+    }
+  }
+}
+```
+
+- `auto_start` starts the local companion service when Zed launches.
+- `follow_active_session` makes the companion follow the active agent session until you explicitly share a specific session.
+
 ### Font Size
 
 Use the `agent_ui_font_size` setting to change the font size of rendered agent responses in the panel.

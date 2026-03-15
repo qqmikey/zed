@@ -683,6 +683,7 @@ fn main() {
             false,
             cx,
         );
+        CompanionManager::bootstrap(cx);
 
         repl::init(app_state.fs.clone(), cx);
         recent_projects::init(cx);

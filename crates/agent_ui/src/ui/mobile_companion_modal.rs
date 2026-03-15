@@ -1,4 +1,6 @@
-use agent_companion::{CompanionManager, CompanionManagerEvent, CompanionServiceState};
+use agent_companion::{
+    CompanionManager, CompanionManagerEvent, CompanionServiceState, CompanionSessionMode,
+};
 use gpui::{
     Action, App, ClickEvent, ClipboardItem, Context, DismissEvent, Entity, EventEmitter,
     FocusHandle, Focusable, Subscription, Window,
@@ -97,6 +99,19 @@ impl MobileCompanionModal {
             .detach_and_log_err(cx);
     }
 
+    fn start(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let companion_manager = self.companion_manager.clone();
+
+        window
+            .spawn(cx, async move |cx| {
+                companion_manager
+                    .update(cx, |manager, cx| manager.start(cx))
+                    .await
+                    .map(|_| ())
+            })
+            .detach_and_log_err(cx);
+    }
+
     fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(DismissEvent);
     }
@@ -115,10 +130,15 @@ impl MobileCompanionModal {
         };
 
         let session_label = status
-            .active_session
+            .shared_session
             .as_ref()
             .map(|session| session.title.clone())
-            .unwrap_or_else(|| "No active thread selected".to_string());
+            .unwrap_or_else(|| match status.selection_mode {
+                CompanionSessionMode::FollowActive => {
+                    "Following the active agent session".to_string()
+                }
+                CompanionSessionMode::Pinned => "No shared session selected".to_string(),
+            });
 
         let body = match &status.state {
             CompanionServiceState::Running => {
@@ -216,10 +236,19 @@ impl Render for MobileCompanionModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let status = self.companion_manager.read(cx).status().clone();
         let is_running = matches!(status.state, CompanionServiceState::Running);
+        let is_stopped = matches!(
+            status.state,
+            CompanionServiceState::Stopped | CompanionServiceState::Failed { .. }
+        );
         let stop_button = is_running.then(|| {
             Button::new("stop-mobile-companion", "Stop Sharing")
                 .style(ButtonStyle::Tinted(TintColor::Warning))
                 .on_click(cx.listener(Self::stop))
+        });
+        let start_button = is_stopped.then(|| {
+            Button::new("start-mobile-companion", "Start Sharing")
+                .style(ButtonStyle::Tinted(TintColor::Accent))
+                .on_click(cx.listener(Self::start))
         });
 
         div()
@@ -235,7 +264,7 @@ impl Render for MobileCompanionModal {
                         ModalHeader::new()
                             .headline("Mobile Companion")
                             .description(
-                                "Share the current Zed agent session with another device on your local network.",
+                                "Inspect and control the mobile companion service for agent sessions on your local network.",
                             )
                             .show_dismiss_button(true),
                     )
@@ -264,6 +293,9 @@ impl Render for MobileCompanionModal {
                             .end_slot(
                                 h_flex()
                                     .gap_2()
+                                    .when_some(start_button, |this, start_button| {
+                                        this.child(start_button)
+                                    })
                                     .when_some(stop_button, |this, stop_button| {
                                         this.child(stop_button)
                                     })

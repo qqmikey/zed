@@ -52,6 +52,7 @@ pub struct AgentSettings {
     pub show_turn_stats: bool,
     pub tool_permissions: ToolPermissions,
     pub new_thread_location: NewThreadLocation,
+    pub mobile_companion: MobileCompanionSettings,
 }
 
 impl AgentSettings {
@@ -86,6 +87,21 @@ impl AgentSettings {
             .iter()
             .map(|sel| ModelId::new(format!("{}/{}", sel.provider.0, sel.model)))
             .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MobileCompanionSettings {
+    pub auto_start: bool,
+    pub follow_active_session: bool,
+}
+
+impl Default for MobileCompanionSettings {
+    fn default() -> Self {
+        Self {
+            auto_start: false,
+            follow_active_session: true,
+        }
     }
 }
 
@@ -440,6 +456,13 @@ impl Settings for AgentSettings {
             show_turn_stats: agent.show_turn_stats.unwrap(),
             tool_permissions: compile_tool_permissions(agent.tool_permissions),
             new_thread_location: agent.new_thread_location.unwrap_or_default(),
+            mobile_companion: agent
+                .mobile_companion
+                .map(|settings| MobileCompanionSettings {
+                    auto_start: settings.auto_start.unwrap_or(false),
+                    follow_active_session: settings.follow_active_session.unwrap_or(true),
+                })
+                .unwrap_or_default(),
         }
     }
 }

@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 acp_thread.workspace = true
+agent_settings.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
 assistant_text_thread.workspace = true
@@ -23,6 +24,7 @@ gpui_tokio.workspace = true
 language_model.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+settings.workspace = true
 tokio = { workspace = true, features = ["net", "sync"] }
 uuid.workspace = true
 

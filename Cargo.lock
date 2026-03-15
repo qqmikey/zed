@@ -262,6 +262,7 @@ version = "0.1.0"
 dependencies = [
  "acp_thread",
  "agent-client-protocol",
+ "agent_settings",
  "anyhow",
  "assistant_slash_command",
  "assistant_text_thread",

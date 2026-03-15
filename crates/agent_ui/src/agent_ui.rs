@@ -93,9 +93,9 @@ actions!(
         ToggleNavigationMenu,
         /// Toggles the options menu for agent settings and preferences.
         ToggleOptionsMenu,
-        /// Starts sharing the current agent session through the mobile companion service.
+        /// Opens the mobile companion controls and shares the current agent session when available.
         ShareMobileCompanion,
-        /// Stops the mobile companion service for the current workspace.
+        /// Stops the mobile companion service.
         StopMobileCompanion,
         /// Toggles the profile or mode selector for switching between agent profiles.
         ToggleProfileSelector,
@@ -661,6 +661,7 @@ mod tests {
             tool_permissions: Default::default(),
             show_turn_stats: false,
             new_thread_location: Default::default(),
+            mobile_companion: Default::default(),
         };
 
         cx.update(|cx| {

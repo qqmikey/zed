@@ -33,6 +33,18 @@ pub enum NewThreadLocation {
     NewWorktree,
 }
 
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
+pub struct MobileCompanionSettingsContent {
+    /// Whether to start the mobile companion service automatically when Zed launches.
+    ///
+    /// Default: false
+    pub auto_start: Option<bool>,
+    /// Whether the mobile companion should follow the active agent session by default.
+    ///
+    /// Default: true
+    pub follow_active_session: Option<bool>,
+}
+
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
 pub struct AgentSettingsContent {
@@ -87,6 +99,8 @@ pub struct AgentSettingsContent {
     ///
     /// Default: "local_project"
     pub new_thread_location: Option<NewThreadLocation>,
+    /// Settings for the mobile companion service.
+    pub mobile_companion: Option<MobileCompanionSettingsContent>,
     /// The available agent profiles.
     pub profiles: Option<IndexMap<Arc<str>, AgentProfileContent>>,
     /// Where to show a popup notification when the agent is waiting for user input.

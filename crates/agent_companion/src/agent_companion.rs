@@ -3,10 +3,12 @@ mod server;
 mod session_mirror;
 mod static_client;
 
+use agent_settings::{AgentSettings, MobileCompanionSettings};
 use anyhow::Result;
 use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription, Task};
 use gpui_tokio::Tokio;
+use settings::{Settings as _, SettingsStore};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -21,8 +23,10 @@ pub use session_mirror::{CompanionSessionMirror, CompanionSessionSource};
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompanionManagerStatus {
     pub state: CompanionServiceState,
-    pub active_session: Option<CompanionSessionSummary>,
+    pub selection_mode: CompanionSessionMode,
+    pub shared_session: Option<CompanionSessionSummary>,
     pub access_info: Option<CompanionAccessInfo>,
+    pub settings: MobileCompanionSettings,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -49,6 +53,13 @@ pub struct CompanionSessionTarget {
     pub title: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CompanionSessionMode {
+    #[default]
+    FollowActive,
+    Pinned,
+}
+
 #[derive(Clone, Debug)]
 pub enum CompanionManagerEvent {
     StatusChanged,
@@ -62,6 +73,8 @@ pub struct CompanionManager {
     mirror: Entity<CompanionSessionMirror>,
     status: CompanionManagerStatus,
     server: Option<CompanionServerHandle>,
+    follow_source: Option<CompanionSessionSource>,
+    pinned_source: Option<CompanionSessionSource>,
     _mirror_subscription: Subscription,
     _command_task: Option<Task<Result<()>>>,
 }
@@ -78,6 +91,30 @@ impl CompanionManager {
         cx.global::<GlobalCompanionManager>().0.clone()
     }
 
+    pub fn bootstrap(cx: &mut App) {
+        let manager = Self::global(cx);
+        manager.update(cx, |manager, cx| {
+            manager.apply_settings(AgentSettings::get_global(cx).mobile_companion.clone(), cx);
+        });
+
+        cx.observe_global::<SettingsStore>({
+            let manager = manager.clone();
+            move |cx| {
+                manager.update(cx, |manager, cx| {
+                    manager
+                        .apply_settings(AgentSettings::get_global(cx).mobile_companion.clone(), cx);
+                });
+            }
+        })
+        .detach();
+
+        if manager.read(cx).status().settings.auto_start {
+            manager
+                .update(cx, |manager, cx| manager.start(cx))
+                .detach_and_log_err(cx);
+        }
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mirror = cx.new(|_| {
             CompanionSessionMirror::new(CompanionConnectionMetadata {
@@ -92,6 +129,8 @@ impl CompanionManager {
             mirror,
             status: CompanionManagerStatus::default(),
             server: None,
+            follow_source: None,
+            pinned_source: None,
             _mirror_subscription: mirror_subscription,
             _command_task: None,
         }
@@ -105,19 +144,33 @@ impl CompanionManager {
         &self.status
     }
 
-    pub fn set_source(&mut self, source: Option<CompanionSessionSource>, cx: &mut Context<Self>) {
-        self.mirror
-            .update(cx, |mirror, cx| mirror.set_source(source, cx));
-        self.status.active_session = self.mirror.read(cx).snapshot().session.clone();
+    pub fn set_follow_source(
+        &mut self,
+        source: Option<CompanionSessionSource>,
+        cx: &mut Context<Self>,
+    ) {
+        self.follow_source = source;
+        if self.status.selection_mode == CompanionSessionMode::FollowActive {
+            self.sync_effective_source(cx);
+            self.emit_status(cx);
+        }
+    }
+
+    pub fn pin_source(&mut self, source: CompanionSessionSource, cx: &mut Context<Self>) {
+        self.pinned_source = Some(source);
+        self.status.selection_mode = CompanionSessionMode::Pinned;
+        self.sync_effective_source(cx);
         self.emit_status(cx);
     }
 
-    pub fn start(
-        &mut self,
-        source: CompanionSessionSource,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<CompanionAccessInfo>> {
-        self.set_source(Some(source), cx);
+    pub fn follow_active_session(&mut self, cx: &mut Context<Self>) {
+        self.status.selection_mode = CompanionSessionMode::FollowActive;
+        self.sync_effective_source(cx);
+        self.emit_status(cx);
+    }
+
+    pub fn start(&mut self, cx: &mut Context<Self>) -> Task<Result<CompanionAccessInfo>> {
+        self.sync_effective_source(cx);
 
         if let Some(access_info) = self.status.access_info.clone() {
             self.status.state = CompanionServiceState::Running;
@@ -136,7 +189,7 @@ impl CompanionManager {
 
         let initial_snapshot = self.mirror.read(cx).snapshot().clone();
         self.status.state = CompanionServiceState::Starting;
-        self.status.active_session = initial_snapshot.session.clone();
+        self.status.shared_session = initial_snapshot.session.clone();
         self.emit_status(cx);
 
         let startup = Tokio::spawn_result(
@@ -226,6 +279,43 @@ impl CompanionManager {
         })
     }
 
+    fn apply_settings(&mut self, settings: MobileCompanionSettings, cx: &mut Context<Self>) {
+        let previous_settings = self.status.settings.clone();
+        let previous_mode = self.status.selection_mode;
+        self.status.settings = settings.clone();
+
+        if self.pinned_source.is_none() {
+            self.status.selection_mode = if settings.follow_active_session {
+                CompanionSessionMode::FollowActive
+            } else {
+                CompanionSessionMode::Pinned
+            };
+        }
+
+        if previous_mode != self.status.selection_mode {
+            self.sync_effective_source(cx);
+        }
+
+        if previous_settings != self.status.settings || previous_mode != self.status.selection_mode
+        {
+            self.emit_status(cx);
+        }
+    }
+
+    fn effective_source(&self) -> Option<CompanionSessionSource> {
+        match self.status.selection_mode {
+            CompanionSessionMode::FollowActive => self.follow_source.clone(),
+            CompanionSessionMode::Pinned => self.pinned_source.clone(),
+        }
+    }
+
+    fn sync_effective_source(&mut self, cx: &mut Context<Self>) {
+        let source = self.effective_source();
+        self.mirror
+            .update(cx, |mirror, cx| mirror.set_source(source, cx));
+        self.status.shared_session = self.mirror.read(cx).snapshot().session.clone();
+    }
+
     fn handle_command(&mut self, command: CompanionCommand, cx: &mut Context<Self>) -> Result<()> {
         match command {
             CompanionCommand::SendMessage { text } => {
@@ -249,7 +339,7 @@ impl CompanionManager {
         event: &CompanionEvent,
         cx: &mut Context<Self>,
     ) {
-        self.status.active_session = mirror.read(cx).snapshot().session.clone();
+        self.status.shared_session = mirror.read(cx).snapshot().session.clone();
 
         if let Some(server) = &self.server {
             server.publish_snapshot(mirror.read(cx).snapshot().clone());
