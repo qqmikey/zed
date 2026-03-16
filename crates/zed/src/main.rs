@@ -6,6 +6,7 @@ mod zed;
 
 use agent::{SharedThread, ThreadStore};
 use agent_client_protocol;
+use agent_companion::CompanionManager;
 use agent_ui::AgentPanel;
 use anyhow::{Context as _, Error, Result};
 use clap::Parser;
@@ -464,6 +465,7 @@ fn main() {
 
         release_channel::init(app_version, cx);
         gpui_tokio::init(cx);
+        CompanionManager::init(cx);
         if let Some(app_commit_sha) = app_commit_sha {
             AppCommitSha::set_global(app_commit_sha, cx);
         }
@@ -681,6 +683,7 @@ fn main() {
             false,
             cx,
         );
+        CompanionManager::bootstrap(cx);
 
         repl::init(app_state.fs.clone(), cx);
         recent_projects::init(cx);

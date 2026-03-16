@@ -20,6 +20,7 @@ pub use crate::agent_profile::*;
 pub const SUMMARIZE_THREAD_PROMPT: &str = include_str!("prompts/summarize_thread_prompt.txt");
 pub const SUMMARIZE_THREAD_DETAILED_PROMPT: &str =
     include_str!("prompts/summarize_thread_detailed_prompt.txt");
+pub const DEFAULT_MOBILE_COMPANION_PORT: u16 = 54321;
 
 #[derive(Clone, Debug, RegisterSetting)]
 pub struct AgentSettings {
@@ -52,6 +53,7 @@ pub struct AgentSettings {
     pub show_turn_stats: bool,
     pub tool_permissions: ToolPermissions,
     pub new_thread_location: NewThreadLocation,
+    pub mobile_companion: MobileCompanionSettings,
 }
 
 impl AgentSettings {
@@ -86,6 +88,23 @@ impl AgentSettings {
             .iter()
             .map(|sel| ModelId::new(format!("{}/{}", sel.provider.0, sel.model)))
             .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MobileCompanionSettings {
+    pub auto_start: bool,
+    pub follow_active_session: bool,
+    pub port: u16,
+}
+
+impl Default for MobileCompanionSettings {
+    fn default() -> Self {
+        Self {
+            auto_start: false,
+            follow_active_session: true,
+            port: DEFAULT_MOBILE_COMPANION_PORT,
+        }
     }
 }
 
@@ -440,6 +459,17 @@ impl Settings for AgentSettings {
             show_turn_stats: agent.show_turn_stats.unwrap(),
             tool_permissions: compile_tool_permissions(agent.tool_permissions),
             new_thread_location: agent.new_thread_location.unwrap_or_default(),
+            mobile_companion: agent
+                .mobile_companion
+                .map(|settings| MobileCompanionSettings {
+                    auto_start: settings.auto_start.unwrap_or(false),
+                    follow_active_session: settings.follow_active_session.unwrap_or(true),
+                    port: settings
+                        .port
+                        .filter(|port| *port != 0)
+                        .unwrap_or(DEFAULT_MOBILE_COMPANION_PORT),
+                })
+                .unwrap_or_default(),
         }
     }
 }

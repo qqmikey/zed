@@ -1,0 +1,47 @@
+[package]
+name = "agent_companion"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lib]
+path = "src/agent_companion.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+acp_thread.workspace = true
+agent_settings.workspace = true
+agent-client-protocol.workspace = true
+anyhow.workspace = true
+assistant_text_thread.workspace = true
+axum = { version = "0.6", features = ["json", "ws"] }
+base64.workspace = true
+futures.workspace = true
+gpui.workspace = true
+gpui_tokio.workspace = true
+language_model.workspace = true
+log.workspace = true
+paths.workspace = true
+pulldown-cmark = { workspace = true, features = ["html"] }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+settings.workspace = true
+tokio = { workspace = true, features = ["fs", "net", "sync"] }
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+assistant_slash_command.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+hyper = "0.14"
+language.workspace = true
+language_model = { workspace = true, features = ["test-support"] }
+prompt_store.workspace = true
+settings = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+tower = "0.4"

@@ -7,6 +7,7 @@ use gpui::{Corner, List};
 use language_model::{LanguageModelEffortLevel, Speed};
 use settings::update_settings_file;
 use ui::{ButtonLike, SplitButton, SplitButtonStyle, Tab};
+use uuid::Uuid;
 use workspace::SERIALIZATION_THROTTLE_TIME;
 
 use super::*;
@@ -158,6 +159,7 @@ impl ThreadFeedbackState {
 
 pub enum AcpThreadViewEvent {
     FirstSendRequested { content: Vec<acp::ContentBlock> },
+    QueueChanged,
 }
 
 impl EventEmitter<AcpThreadViewEvent> for ThreadView {}
@@ -596,6 +598,22 @@ impl ThreadView {
         !self.local_queued_messages.is_empty()
     }
 
+    pub fn queued_message_index(&self, queued_message_id: &str) -> Option<usize> {
+        self.local_queued_messages
+            .iter()
+            .position(|queued_message| queued_message.id == queued_message_id)
+    }
+
+    pub fn queued_messages(&self) -> &[QueuedMessage] {
+        &self.local_queued_messages
+    }
+
+    pub fn queue_did_change(&mut self, cx: &mut Context<Self>) {
+        self.sync_queue_flag_to_native_thread(cx);
+        cx.emit(AcpThreadViewEvent::QueueChanged);
+        cx.notify();
+    }
+
     pub fn is_imported_thread(&self, cx: &App) -> bool {
         let Some(thread) = self.as_native_thread(cx) else {
             return false;
@@ -913,12 +931,12 @@ impl ThreadView {
         self.send_content(contents_task, window, cx);
     }
 
-    pub fn send_content(
+    pub fn send_content_task(
         &mut self,
         contents_task: Task<anyhow::Result<Option<(Vec<acp::ContentBlock>, Vec<Entity<Buffer>>)>>>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<anyhow::Result<()>> {
         let session_id = self.thread.read(cx).session_id().clone();
         let parent_session_id = self.thread.read(cx).parent_session_id().cloned();
         let agent_telemetry_id = self.thread.read(cx).connection().telemetry_id();
@@ -1024,13 +1042,15 @@ impl ThreadView {
             res.map(|_| ())
         });
 
-        cx.spawn(async move |this, cx| {
-            if let Err(err) = task.await {
+        cx.spawn(async move |this, cx| match task.await {
+            Err(error) => {
+                let error_message = format!("{error:#}");
                 this.update(cx, |this, cx| {
-                    this.handle_thread_error(err, cx);
-                })
-                .ok();
-            } else {
+                    this.handle_thread_error(anyhow!(error_message.clone()), cx);
+                })?;
+                Err(anyhow!(error_message))
+            }
+            Ok(()) => {
                 this.update(cx, |this, cx| {
                     let should_be_following = this
                         .workspace
@@ -1039,11 +1059,55 @@ impl ThreadView {
                         })
                         .unwrap_or_default();
                     this.should_be_following = should_be_following;
-                })
-                .ok();
+                })?;
+                Ok(())
             }
         })
-        .detach();
+    }
+
+    pub fn send_content(
+        &mut self,
+        contents_task: Task<anyhow::Result<Option<(Vec<acp::ContentBlock>, Vec<Entity<Buffer>>)>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_content_task(contents_task, window, cx)
+            .detach_and_log_err(cx);
+    }
+
+    pub fn send_queued_message_content(
+        &mut self,
+        queued_message: QueuedMessage,
+        is_send_now: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<()>> {
+        let content = queued_message.content;
+        let tracked_buffers = queued_message.tracked_buffers;
+
+        if is_send_now {
+            let is_generating =
+                self.thread.read(cx).status() == acp_thread::ThreadStatus::Generating;
+            self.skip_queue_processing_count += if is_generating { 1 } else { 0 };
+        }
+
+        let cancelled = self.thread.update(cx, |thread, cx| thread.cancel(cx));
+        let workspace = self.workspace.clone();
+        let should_be_following = self.should_be_following;
+        let contents_task = cx.spawn_in(window, async move |_this, cx| {
+            cancelled.await;
+            if should_be_following {
+                workspace
+                    .update_in(cx, |workspace, window, cx| {
+                        workspace.follow(CollaboratorId::Agent, window, cx);
+                    })
+                    .ok();
+            }
+
+            Ok(Some((content, tracked_buffers)))
+        });
+
+        self.send_content_task(contents_task, window, cx)
     }
 
     pub fn interrupt_and_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1268,10 +1332,11 @@ impl ThreadView {
         cx: &mut Context<Self>,
     ) {
         self.local_queued_messages.push(QueuedMessage {
+            id: Uuid::new_v4().to_string(),
             content,
             tracked_buffers,
         });
-        self.sync_queue_flag_to_native_thread(cx);
+        self.queue_did_change(cx);
     }
 
     pub fn remove_from_queue(
@@ -1281,11 +1346,20 @@ impl ThreadView {
     ) -> Option<QueuedMessage> {
         if index < self.local_queued_messages.len() {
             let removed = self.local_queued_messages.remove(index);
-            self.sync_queue_flag_to_native_thread(cx);
+            self.queue_did_change(cx);
             Some(removed)
         } else {
             None
         }
+    }
+
+    pub fn remove_queued_message_by_id(
+        &mut self,
+        queued_message_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<QueuedMessage> {
+        let index = self.queued_message_index(queued_message_id)?;
+        self.remove_from_queue(index, cx)
     }
 
     pub fn sync_queue_flag_to_native_thread(&self, cx: &mut Context<Self>) {
@@ -1307,38 +1381,8 @@ impl ThreadView {
         let Some(queued) = self.remove_from_queue(index, cx) else {
             return;
         };
-        let content = queued.content;
-        let tracked_buffers = queued.tracked_buffers;
-
-        // Only increment skip count for "Send Now" operations (out-of-order sends)
-        // Normal auto-processing from the Stopped handler doesn't need to skip.
-        // We only skip the Stopped event from the cancelled generation, NOT the
-        // Stopped event from the newly sent message (which should trigger queue processing).
-        if is_send_now {
-            let is_generating =
-                self.thread.read(cx).status() == acp_thread::ThreadStatus::Generating;
-            self.skip_queue_processing_count += if is_generating { 1 } else { 0 };
-        }
-
-        let cancelled = self.thread.update(cx, |thread, cx| thread.cancel(cx));
-
-        let workspace = self.workspace.clone();
-
-        let should_be_following = self.should_be_following;
-        let contents_task = cx.spawn_in(window, async move |_this, cx| {
-            cancelled.await;
-            if should_be_following {
-                workspace
-                    .update_in(cx, |workspace, window, cx| {
-                        workspace.follow(CollaboratorId::Agent, window, cx);
-                    })
-                    .ok();
-            }
-
-            Ok(Some((content, tracked_buffers)))
-        });
-
-        self.send_content(contents_task, window, cx);
+        self.send_queued_message_content(queued, is_send_now, window, cx)
+            .detach_and_log_err(cx);
     }
 
     pub fn move_queued_message_to_main_editor(
@@ -2262,9 +2306,10 @@ impl ThreadView {
             .into_any_element()
     }
 
-    fn clear_queue(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear_queue(&mut self, cx: &mut Context<Self>) {
         self.local_queued_messages.clear();
-        self.sync_queue_flag_to_native_thread(cx);
+        self.can_fast_track_queue = false;
+        self.queue_did_change(cx);
     }
 
     fn render_plan_summary(
@@ -7840,10 +7885,7 @@ impl Render for ThreadView {
                 this.move_queued_message_to_main_editor(0, None, window, cx);
             }))
             .on_action(cx.listener(|this, _: &ClearMessageQueue, _, cx| {
-                this.local_queued_messages.clear();
-                this.sync_queue_flag_to_native_thread(cx);
-                this.can_fast_track_queue = false;
-                cx.notify();
+                this.clear_queue(cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleProfileSelector, window, cx| {
                 if this.thread.read(cx).status() != ThreadStatus::Idle {

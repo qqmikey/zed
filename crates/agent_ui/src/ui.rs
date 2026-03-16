@@ -4,6 +4,7 @@ mod claude_agent_onboarding_modal;
 mod end_trial_upsell;
 mod hold_for_default;
 mod mention_crease;
+mod mobile_companion_modal;
 mod model_selector_components;
 mod undo_reject_toast;
 
@@ -13,5 +14,6 @@ pub use claude_agent_onboarding_modal::*;
 pub use end_trial_upsell::*;
 pub use hold_for_default::*;
 pub use mention_crease::*;
+pub use mobile_companion_modal::*;
 pub use model_selector_components::*;
 pub use undo_reject_toast::*;
