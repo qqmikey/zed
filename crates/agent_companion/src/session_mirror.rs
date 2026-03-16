@@ -334,6 +334,7 @@ fn empty_state(connection: CompanionConnectionMetadata) -> CompanionMirrorState 
             tool_calls: Vec::new(),
             run_status: CompanionRunStatus::Idle,
             available_commands: Vec::new(),
+            queued_messages: Vec::new(),
         },
         assets: Vec::new(),
     }
@@ -433,6 +434,7 @@ fn state_for_acp_thread(
             tool_calls,
             run_status: map_acp_run_status(thread),
             available_commands: available_commands_for_acp_thread(thread),
+            queued_messages: Vec::new(),
         },
         assets,
     }
@@ -488,6 +490,7 @@ fn state_for_text_thread(
             tool_calls: Vec::new(),
             run_status: map_text_run_status(thread, cx),
             available_commands: available_commands_for_text_thread(thread, cx),
+            queued_messages: Vec::new(),
         },
         assets,
     }
@@ -956,7 +959,7 @@ async fn build_uploaded_message(
     cx: &mut gpui::AsyncApp,
 ) -> Result<Vec<acp::ContentBlock>> {
     let uploaded_blocks = cx
-        .background_spawn(async move { uploaded_blocks_for_companion_uploads(uploads) })
+        .background_spawn(async move { companion_upload_blocks(uploads) })
         .await?;
     let mut message = Vec::new();
 
@@ -1007,11 +1010,11 @@ impl CompanionExtractedContent {
     }
 }
 
-struct CompanionFinishedContent {
-    text: String,
-    rendered_html: Option<String>,
-    attachments: Vec<CompanionAttachment>,
-    assets: Vec<CompanionAsset>,
+pub(crate) struct CompanionFinishedContent {
+    pub(crate) text: String,
+    pub(crate) rendered_html: Option<String>,
+    pub(crate) attachments: Vec<CompanionAttachment>,
+    pub(crate) assets: Vec<CompanionAsset>,
 }
 
 fn companion_content_from_acp_blocks(
@@ -1078,6 +1081,14 @@ fn companion_content_from_acp_blocks(
     }
 
     content.finish(message_id, &mut attachment_index, token_id)
+}
+
+pub(crate) fn prepared_content_from_acp_blocks(
+    blocks: &[acp::ContentBlock],
+    message_id: &str,
+    token_id: &str,
+) -> CompanionFinishedContent {
+    companion_content_from_acp_blocks(blocks, message_id, ResourceBlockFallback::Uri, token_id)
 }
 
 fn companion_content_from_assistant_message(
@@ -1341,7 +1352,7 @@ fn local_file_path_from_uri(uri: &str) -> Option<PathBuf> {
     url.to_file_path().ok()
 }
 
-fn uploaded_blocks_for_companion_uploads(
+pub(crate) fn companion_upload_blocks(
     uploads: Vec<CompanionUpload>,
 ) -> Result<Vec<acp::ContentBlock>> {
     let mut blocks = Vec::with_capacity(uploads.len());

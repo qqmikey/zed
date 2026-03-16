@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
@@ -13,7 +14,10 @@ use acp_thread::{AcpThread, MentionUri, ThreadStatus};
 use agent::{ContextServerRegistry, SharedThread, ThreadStore};
 use agent_client_protocol as acp;
 use agent_companion::{
-    CompanionManager, CompanionManagerEvent, CompanionServiceState, CompanionSessionSource,
+    CompanionComposerDraft, CompanionComposerSubmission, CompanionManager, CompanionManagerEvent,
+    CompanionQueueController, CompanionQueueDraft, CompanionQueueState, CompanionQueuedMessage,
+    CompanionServiceState, CompanionSessionSource, build_companion_upload_blocks,
+    prepare_companion_content,
 };
 use agent_servers::AgentServer;
 use collections::HashSet;
@@ -71,12 +75,12 @@ use extension_host::ExtensionStore;
 use fs::Fs;
 use git::repository::validate_worktree_directory;
 use gpui::{
-    Action, Animation, AnimationExt, AnyElement, AnyView, App, AsyncWindowContext, ClipboardItem,
-    Corner, DismissEvent, DragMoveEvent, Entity, EventEmitter, ExternalPaths, FocusHandle,
-    Focusable, KeyContext, MouseButton, Pixels, Subscription, Task, UpdateGlobal, WeakEntity,
-    deferred, prelude::*, pulsating_between,
+    Action, Animation, AnimationExt, AnyElement, AnyView, AnyWindowHandle, App, AsyncWindowContext,
+    ClipboardItem, Corner, DismissEvent, DragMoveEvent, Entity, EntityId, EventEmitter,
+    ExternalPaths, FocusHandle, Focusable, KeyContext, MouseButton, Pixels, Subscription, Task,
+    UpdateGlobal, WeakEntity, deferred, prelude::*, pulsating_between,
 };
-use language::LanguageRegistry;
+use language::{Buffer, LanguageRegistry};
 use language_model::{ConfigurationError, LanguageModelRegistry};
 use project::project_settings::ProjectSettings;
 use project::{Project, ProjectPath, Worktree};
@@ -90,6 +94,7 @@ use ui::{
     PopoverMenu, PopoverMenuHandle, SpinnerLabel, Tab, Tooltip, prelude::*, utils::WithRemSize,
 };
 use util::{ResultExt as _, debug_panic};
+use uuid::Uuid;
 use workspace::{
     CollaboratorId, DraggedSelection, DraggedSidebar, DraggedTab, FocusWorkspaceSidebar,
     MultiWorkspace, OpenResult, SIDEBAR_RESIZE_HANDLE_SIZE, ToggleWorkspaceSidebar, ToggleZoom,
@@ -154,6 +159,286 @@ fn find_or_create_sidebar_for_window(
         .0
         .insert(window_id, sidebar.downgrade());
     Some(sidebar)
+}
+
+#[derive(Clone)]
+struct AgentPanelCompanionDraftState {
+    attachment_blocks: Vec<(String, acp::ContentBlock)>,
+    tracked_buffers: Vec<Entity<Buffer>>,
+}
+
+struct AgentPanelCompanionQueueController {
+    thread_view: WeakEntity<ThreadView>,
+    thread_view_id: EntityId,
+    window_handle: AnyWindowHandle,
+    drafts_by_id: Rc<RefCell<HashMap<String, AgentPanelCompanionDraftState>>>,
+}
+
+impl AgentPanelCompanionQueueController {
+    fn new(thread_view: &Entity<ThreadView>, window_handle: AnyWindowHandle) -> Self {
+        Self {
+            thread_view: thread_view.downgrade(),
+            thread_view_id: thread_view.entity_id(),
+            window_handle,
+            drafts_by_id: Rc::new(RefCell::new(HashMap::default())),
+        }
+    }
+
+    fn matches(&self, thread_view: &Entity<ThreadView>, window_handle: AnyWindowHandle) -> bool {
+        self.thread_view_id == thread_view.entity_id() && self.window_handle == window_handle
+    }
+
+    fn read_thread_view<R>(
+        &self,
+        cx: &App,
+        read: impl FnOnce(&ThreadView, &App) -> R,
+    ) -> Result<R> {
+        self.thread_view
+            .read_with(cx, read)
+            .context("active thread view is unavailable")
+    }
+
+    fn update_thread_view<R>(
+        &self,
+        cx: &mut App,
+        update: impl FnOnce(&mut ThreadView, &mut Window, &mut Context<ThreadView>) -> R,
+    ) -> Result<R> {
+        cx.update_window(self.window_handle, move |_, window, cx| {
+            self.thread_view
+                .update(cx, |thread_view, cx| update(thread_view, window, cx))
+        })
+        .context("companion window is unavailable")?
+        .context("active thread view is unavailable")
+    }
+}
+
+impl CompanionQueueController for AgentPanelCompanionQueueController {
+    fn queue_state(&self, token_id: &str, cx: &App) -> Result<CompanionQueueState> {
+        self.read_thread_view(cx, |thread_view, _cx| {
+            let mut queued_messages = Vec::with_capacity(thread_view.queued_messages().len());
+            let mut assets = Vec::new();
+
+            for (index, queued_message) in thread_view.queued_messages().iter().enumerate() {
+                let prepared_content = prepare_companion_content(
+                    &queued_message.content,
+                    &queued_message.id,
+                    token_id,
+                );
+                queued_messages.push(CompanionQueuedMessage {
+                    id: queued_message.id.clone(),
+                    is_next: index == 0,
+                    text: prepared_content.text,
+                    rendered_html: prepared_content.rendered_html,
+                    attachments: prepared_content.attachments,
+                });
+                assets.extend(prepared_content.assets);
+            }
+
+            CompanionQueueState {
+                queued_messages,
+                assets,
+            }
+        })
+    }
+
+    fn send_or_queue_message(
+        &self,
+        submission: CompanionComposerSubmission,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        let window_handle = self.window_handle;
+        let thread_view = self.thread_view.clone();
+        let drafts_by_id = self.drafts_by_id.clone();
+        let draft_state = submission
+            .draft_id
+            .as_ref()
+            .and_then(|draft_id| drafts_by_id.borrow().get(draft_id).cloned());
+
+        cx.spawn(async move |cx| {
+            if submission.draft_id.is_some() && draft_state.is_none() {
+                return Err(anyhow!("queued message draft is no longer available"));
+            }
+
+            let upload_blocks = cx
+                .background_spawn({
+                    let attachments = submission.attachments.clone();
+                    async move { build_companion_upload_blocks(attachments) }
+                })
+                .await?;
+
+            let mut content = Vec::new();
+            if !submission.text.trim().is_empty() {
+                content.push(acp::ContentBlock::Text(acp::TextContent::new(
+                    submission.text.clone(),
+                )));
+            }
+
+            let tracked_buffers = draft_state
+                .as_ref()
+                .map(|draft_state| draft_state.tracked_buffers.clone())
+                .unwrap_or_default();
+
+            if let Some(draft_state) = &draft_state {
+                let retained_attachment_ids =
+                    HashSet::from_iter(submission.retained_attachment_ids.iter().cloned());
+                content.extend(
+                    draft_state
+                        .attachment_blocks
+                        .iter()
+                        .filter(|(attachment_id, _)| {
+                            retained_attachment_ids.contains(attachment_id)
+                        })
+                        .map(|(_, block)| block.clone()),
+                );
+            }
+
+            content.extend(upload_blocks);
+
+            if content.is_empty() {
+                return Err(anyhow!("companion message is empty"));
+            }
+
+            cx.update_window(window_handle, |_, window, cx| {
+                thread_view.update(cx, |thread_view, cx| {
+                    if thread_view.thread.read(cx).status() == ThreadStatus::Idle {
+                        thread_view
+                            .send_content_task(
+                                Task::ready(Ok(Some((content, tracked_buffers)))),
+                                window,
+                                cx,
+                            )
+                            .detach_and_log_err(cx);
+                    } else {
+                        thread_view.add_to_queue(content, tracked_buffers, cx);
+                        thread_view.can_fast_track_queue = true;
+                    }
+                })
+            })
+            .context("companion window is unavailable")?
+            .context("active thread view is unavailable")?;
+
+            if let Some(draft_id) = submission.draft_id {
+                drafts_by_id.borrow_mut().remove(&draft_id);
+            }
+
+            Ok(())
+        })
+    }
+
+    fn remove_queued_message(&self, queued_message_id: &str, cx: &mut App) -> Result<()> {
+        self.update_thread_view(cx, |thread_view, _window, cx| {
+            thread_view
+                .remove_queued_message_by_id(queued_message_id, cx)
+                .ok_or_else(|| anyhow!("queued message is no longer available"))
+                .map(|_| ())
+        })?
+    }
+
+    fn send_queued_message_now(&self, queued_message_id: &str, cx: &mut App) -> Task<Result<()>> {
+        match self.update_thread_view(cx, |thread_view, window, cx| {
+            let queued_message = thread_view
+                .remove_queued_message_by_id(queued_message_id, cx)
+                .ok_or_else(|| anyhow!("queued message is no longer available"))?;
+            Ok::<_, anyhow::Error>(thread_view.send_queued_message_content(
+                queued_message,
+                true,
+                window,
+                cx,
+            ))
+        }) {
+            Ok(Ok(task)) => {
+                task.detach_and_log_err(cx);
+                Task::ready(Ok(()))
+            }
+            Ok(Err(error)) => Task::ready(Err(error)),
+            Err(error) => Task::ready(Err(error)),
+        }
+    }
+
+    fn edit_queued_message(
+        &self,
+        queued_message_id: &str,
+        token_id: &str,
+        cx: &mut App,
+    ) -> Result<CompanionQueueDraft> {
+        let (draft, draft_state) = self.update_thread_view(cx, |thread_view, _window, cx| {
+            let queued_message = thread_view
+                .remove_queued_message_by_id(queued_message_id, cx)
+                .ok_or_else(|| anyhow!("queued message is no longer available"))?;
+            Ok::<_, anyhow::Error>(companion_queue_draft_from_message(
+                &queued_message,
+                token_id,
+            ))
+        })??;
+
+        self.drafts_by_id
+            .borrow_mut()
+            .insert(draft.composer_draft.id.clone(), draft_state);
+        Ok(draft)
+    }
+
+    fn discard_draft(&self, draft_id: &str, _cx: &mut App) -> Result<()> {
+        self.drafts_by_id.borrow_mut().remove(draft_id);
+        Ok(())
+    }
+
+    fn clear_queued_messages(&self, cx: &mut App) -> Result<()> {
+        self.update_thread_view(cx, |thread_view, _window, cx| {
+            thread_view.clear_queue(cx);
+        })?;
+        Ok(())
+    }
+}
+
+fn companion_queue_draft_from_message(
+    queued_message: &crate::connection_view::QueuedMessage,
+    token_id: &str,
+) -> (CompanionQueueDraft, AgentPanelCompanionDraftState) {
+    let draft_id = Uuid::new_v4().to_string();
+    let mut prepared_content =
+        prepare_companion_content(&queued_message.content, &draft_id, token_id);
+
+    let mut draft_attachment_ids = Vec::new();
+    let mut attachment_blocks = Vec::new();
+    for block in &queued_message.content {
+        let prepared_block =
+            prepare_companion_content(std::slice::from_ref(block), &draft_id, token_id);
+        if !prepared_block.attachments.is_empty() {
+            let attachment_id =
+                format!("{draft_id}-draft-attachment-{}", draft_attachment_ids.len());
+            draft_attachment_ids.push(attachment_id.clone());
+            attachment_blocks.push((attachment_id, block.clone()));
+        }
+    }
+
+    for (attachment, attachment_id) in prepared_content
+        .attachments
+        .iter_mut()
+        .zip(draft_attachment_ids.into_iter())
+    {
+        match attachment {
+            agent_companion::CompanionAttachment::Image { id, .. }
+            | agent_companion::CompanionAttachment::File { id, .. }
+            | agent_companion::CompanionAttachment::Link { id, .. } => {
+                *id = attachment_id;
+            }
+        }
+    }
+
+    (
+        CompanionQueueDraft {
+            composer_draft: CompanionComposerDraft {
+                id: draft_id,
+                text: prepared_content.text,
+                attachments: prepared_content.attachments,
+            },
+            assets: prepared_content.assets,
+        },
+        AgentPanelCompanionDraftState {
+            attachment_blocks,
+            tracked_buffers: queued_message.tracked_buffers.clone(),
+        },
+    )
 }
 
 fn read_serialized_panel(workspace_id: workspace::WorkspaceId) -> Option<SerializedAgentPanel> {
@@ -1006,6 +1291,7 @@ pub struct AgentPanel {
     _active_thread_focus_subscription: Option<Subscription>,
     _worktree_creation_task: Option<Task<()>>,
     _companion_manager_subscription: Option<Subscription>,
+    companion_queue_controller: Option<Rc<AgentPanelCompanionQueueController>>,
     show_trust_workspace_message: bool,
     last_configuration_error_telemetry: Option<String>,
     on_boarding_upsell_dismissed: AtomicBool,
@@ -1349,6 +1635,7 @@ impl AgentPanel {
             _active_thread_focus_subscription: None,
             _worktree_creation_task: None,
             _companion_manager_subscription: companion_manager_subscription,
+            companion_queue_controller: None,
             show_trust_workspace_message: false,
             last_configuration_error_telemetry: None,
             on_boarding_upsell_dismissed: AtomicBool::new(OnboardingUpsell::dismissed()),
@@ -2238,13 +2525,41 @@ impl AgentPanel {
         ))
     }
 
-    fn sync_companion_source(&mut self, cx: &mut Context<Self>) {
+    fn sync_companion_source(
+        &mut self,
+        window_handle: Option<AnyWindowHandle>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(companion_manager) = CompanionManager::try_global(cx) else {
             return;
         };
         let source = self.companion_session_source(cx);
+        if matches!(self.active_view, ActiveView::AgentThread { .. }) && source.is_none() {
+            return;
+        }
+        let queue_controller = if let Some((thread_view, window_handle)) =
+            self.as_active_thread_view(cx).zip(window_handle)
+        {
+            let queue_controller = self
+                .companion_queue_controller
+                .as_ref()
+                .filter(|controller| controller.matches(&thread_view, window_handle.clone()))
+                .cloned()
+                .unwrap_or_else(|| {
+                    Rc::new(AgentPanelCompanionQueueController::new(
+                        &thread_view,
+                        window_handle,
+                    ))
+                });
+            self.companion_queue_controller = Some(queue_controller.clone());
+            Some(queue_controller as Rc<dyn CompanionQueueController>)
+        } else {
+            self.companion_queue_controller = None;
+            None
+        };
 
         companion_manager.update(cx, |manager, cx| {
+            manager.set_queue_controller(queue_controller, cx);
             manager.set_follow_source(source, cx);
         });
     }
@@ -2369,7 +2684,7 @@ impl AgentPanel {
                     cx.observe_in(server_view, window, |this, server_view, window, cx| {
                         this._thread_view_subscription =
                             Self::subscribe_to_active_thread_view(&server_view, window, cx);
-                        this.sync_companion_source(cx);
+                        this.sync_companion_source(Some(window.window_handle()), cx);
                         cx.emit(AgentPanelEvent::ActiveViewChanged);
                         this.serialize(cx);
                         cx.notify();
@@ -2392,7 +2707,7 @@ impl AgentPanel {
             }
         }
 
-        self.sync_companion_source(cx);
+        self.sync_companion_source(Some(window.window_handle()), cx);
 
         if focus {
             self.focus_handle(cx).focus(window, cx);
@@ -2511,6 +2826,9 @@ impl AgentPanel {
                 |this, view, event: &AcpThreadViewEvent, window, cx| match event {
                     AcpThreadViewEvent::FirstSendRequested { content } => {
                         this.handle_first_send_requested(view.clone(), content.clone(), window, cx);
+                    }
+                    AcpThreadViewEvent::QueueChanged => {
+                        this.sync_companion_source(Some(window.window_handle()), cx);
                     }
                 },
             )
@@ -6148,7 +6466,7 @@ mod tests {
 
         panel.update(&mut cx, |panel, cx| {
             panel.active_view = ActiveView::Uninitialized;
-            panel.sync_companion_source(cx);
+            panel.sync_companion_source(None, cx);
         });
         cx.run_until_parked();
 
@@ -6158,6 +6476,33 @@ mod tests {
                 "followed companion session should clear when the panel has no active thread"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_sync_companion_source_reuses_queue_controller_for_active_thread(
+        cx: &mut TestAppContext,
+    ) {
+        let (panel, mut cx) = setup_panel(cx).await;
+
+        open_thread_with_connection(&panel, StubAgentConnection::new(), &mut cx);
+
+        let first_controller = panel
+            .read_with(&cx, |panel, _cx| panel.companion_queue_controller.clone())
+            .expect("active thread should install a queue controller");
+
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.sync_companion_source(Some(window.window_handle()), cx);
+        });
+        cx.run_until_parked();
+
+        let second_controller = panel
+            .read_with(&cx, |panel, _cx| panel.companion_queue_controller.clone())
+            .expect("queue controller should remain installed");
+
+        assert!(
+            Rc::ptr_eq(&first_controller, &second_controller),
+            "sync_companion_source should reuse the same queue controller for the same thread"
+        );
     }
 
     #[gpui::test]

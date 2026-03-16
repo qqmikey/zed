@@ -12,6 +12,8 @@ pub struct CompanionSnapshot {
     pub tool_calls: Vec<CompanionToolCall>,
     pub run_status: CompanionRunStatus,
     pub available_commands: Vec<CompanionCommandKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_messages: Vec<CompanionQueuedMessage>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -53,6 +55,26 @@ pub struct CompanionMessage {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rendered_html: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<CompanionAttachment>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompanionQueuedMessage {
+    pub id: String,
+    #[serde(default)]
+    pub is_next: bool,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_html: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<CompanionAttachment>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompanionComposerDraft {
+    pub id: String,
+    pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<CompanionAttachment>,
 }
@@ -230,6 +252,11 @@ pub enum CompanionEvent {
     RunStatusChanged {
         run_status: CompanionRunStatus,
     },
+    QueueChanged {
+        #[serde(default)]
+        available_commands: Vec<CompanionCommandKind>,
+        queued_messages: Vec<CompanionQueuedMessage>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -251,7 +278,24 @@ pub enum CompanionCommand {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<CompanionUpload>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        draft_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        retained_attachment_ids: Vec<String>,
     },
+    RemoveQueuedMessage {
+        queued_message_id: String,
+    },
+    SendQueuedMessageNow {
+        queued_message_id: String,
+    },
+    EditQueuedMessage {
+        queued_message_id: String,
+    },
+    DiscardComposerDraft {
+        draft_id: String,
+    },
+    ClearQueuedMessages,
     AuthorizeToolCall {
         tool_call_id: String,
         option_id: String,
@@ -265,6 +309,11 @@ pub enum CompanionCommand {
 pub enum CompanionCommandKind {
     SendMessage,
     SendAttachments,
+    RemoveQueuedMessage,
+    SendQueuedMessageNow,
+    EditQueuedMessage,
+    DiscardComposerDraft,
+    ClearQueuedMessages,
     AuthorizeToolCall,
     StopRun,
 }
@@ -276,13 +325,20 @@ pub struct CompanionUpload {
     pub data_base64: String,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompanionCommandResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composer_draft: Option<CompanionComposerDraft>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CompanionAccessMode, CompanionAttachment, CompanionCommand, CompanionCommandKind,
-        CompanionConnectionMetadata, CompanionEvent, CompanionMessage, CompanionMessageRole,
-        CompanionMessageStatus, CompanionPermissionChoice, CompanionPermissionOption,
-        CompanionPermissionRequest, CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot,
+        CompanionCommandResponse, CompanionComposerDraft, CompanionConnectionMetadata,
+        CompanionEvent, CompanionMessage, CompanionMessageRole, CompanionMessageStatus,
+        CompanionPermissionChoice, CompanionPermissionOption, CompanionPermissionRequest,
+        CompanionQueuedMessage, CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot,
         CompanionTimelineEntry, CompanionTimelineToolCall, CompanionTimelineToolCallDetail,
         CompanionToolCall, CompanionToolCallStatus, CompanionUpload,
     };
@@ -399,9 +455,25 @@ mod tests {
             available_commands: vec![
                 CompanionCommandKind::SendMessage,
                 CompanionCommandKind::SendAttachments,
+                CompanionCommandKind::EditQueuedMessage,
+                CompanionCommandKind::DiscardComposerDraft,
+                CompanionCommandKind::SendQueuedMessageNow,
+                CompanionCommandKind::RemoveQueuedMessage,
+                CompanionCommandKind::ClearQueuedMessages,
                 CompanionCommandKind::AuthorizeToolCall,
                 CompanionCommandKind::StopRun,
             ],
+            queued_messages: vec![CompanionQueuedMessage {
+                id: "queued-1".into(),
+                is_next: true,
+                text: "Queue this follow-up".into(),
+                rendered_html: Some("<p>Queue this follow-up</p>\n".into()),
+                attachments: vec![CompanionAttachment::Link {
+                    id: "queued-attachment-1".into(),
+                    name: "Issue".into(),
+                    url: "https://example.com".into(),
+                }],
+            }],
         };
 
         let json = serde_json::to_value(&snapshot)?;
@@ -428,6 +500,8 @@ mod tests {
             "Only this time"
         );
         assert_eq!(json["run_status"], "running_tools");
+        assert_eq!(json["queued_messages"][0]["is_next"], true);
+        assert_eq!(json["queued_messages"][0]["attachments"][0]["type"], "link");
 
         let round_trip: CompanionSnapshot = serde_json::from_value(json)?;
         assert_eq!(round_trip, snapshot);
@@ -501,12 +575,16 @@ mod tests {
                 mime_type: "image/png".into(),
                 data_base64: "AQID".into(),
             }],
+            draft_id: Some("draft-1".into()),
+            retained_attachment_ids: vec!["attachment-1".into()],
         };
 
         let json = serde_json::to_value(&send_message)?;
         assert_eq!(json["type"], "send_message");
         assert_eq!(json["text"], "Stop after this test run");
         assert_eq!(json["attachments"][0]["name"], "calculator-window.png");
+        assert_eq!(json["draft_id"], "draft-1");
+        assert_eq!(json["retained_attachment_ids"][0], "attachment-1");
 
         let round_trip: CompanionCommand = serde_json::from_value(json)?;
         assert_eq!(round_trip, send_message);
@@ -524,6 +602,52 @@ mod tests {
 
         let round_trip: CompanionCommand = serde_json::from_value(json)?;
         assert_eq!(round_trip, authorize);
+
+        let edit = CompanionCommand::EditQueuedMessage {
+            queued_message_id: "queued-1".into(),
+        };
+
+        let json = serde_json::to_value(&edit)?;
+        assert_eq!(json["type"], "edit_queued_message");
+        assert_eq!(json["queued_message_id"], "queued-1");
+
+        let round_trip: CompanionCommand = serde_json::from_value(json)?;
+        assert_eq!(round_trip, edit);
+
+        let discard = CompanionCommand::DiscardComposerDraft {
+            draft_id: "draft-1".into(),
+        };
+
+        let json = serde_json::to_value(&discard)?;
+        assert_eq!(json["type"], "discard_composer_draft");
+        assert_eq!(json["draft_id"], "draft-1");
+
+        let round_trip: CompanionCommand = serde_json::from_value(json)?;
+        assert_eq!(round_trip, discard);
+        Ok(())
+    }
+
+    #[test]
+    fn command_response_round_trips_with_draft() -> anyhow::Result<()> {
+        let response = CompanionCommandResponse {
+            composer_draft: Some(CompanionComposerDraft {
+                id: "draft-1".into(),
+                text: "Revise queued message".into(),
+                attachments: vec![CompanionAttachment::File {
+                    id: "attachment-1".into(),
+                    name: "notes.txt".into(),
+                    mime_type: Some("text/plain".into()),
+                    asset_id: "asset-1".into(),
+                }],
+            }),
+        };
+
+        let json = serde_json::to_value(&response)?;
+        assert_eq!(json["composer_draft"]["id"], "draft-1");
+        assert_eq!(json["composer_draft"]["attachments"][0]["type"], "file");
+
+        let round_trip: CompanionCommandResponse = serde_json::from_value(json)?;
+        assert_eq!(round_trip, response);
         Ok(())
     }
 }

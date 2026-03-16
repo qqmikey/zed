@@ -3,6 +3,7 @@ mod server;
 mod session_mirror;
 mod static_client;
 
+use agent_client_protocol as acp;
 use agent_settings::{AgentSettings, MobileCompanionSettings};
 use anyhow::{Context as _, Result};
 use futures::StreamExt as _;
@@ -11,19 +12,22 @@ use gpui_tokio::Tokio;
 use paths::data_dir;
 use settings::{Settings as _, SettingsStore};
 use std::{
+    collections::HashMap,
     fs,
     path::PathBuf,
+    rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
 pub use protocol::{
     CompanionAccessMode, CompanionAttachment, CompanionCommand, CompanionCommandKind,
-    CompanionConnectionMetadata, CompanionEvent, CompanionMessage, CompanionMessageRole,
-    CompanionMessageStatus, CompanionPermissionChoice, CompanionPermissionOption,
-    CompanionPermissionRequest, CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot,
-    CompanionTimelineEntry, CompanionTimelinePage, CompanionTimelineToolCall,
-    CompanionTimelineToolCallDetail, CompanionToolCall, CompanionToolCallStatus, CompanionUpload,
+    CompanionCommandResponse, CompanionComposerDraft, CompanionConnectionMetadata, CompanionEvent,
+    CompanionMessage, CompanionMessageRole, CompanionMessageStatus, CompanionPermissionChoice,
+    CompanionPermissionOption, CompanionPermissionRequest, CompanionQueuedMessage,
+    CompanionRunStatus, CompanionSessionSummary, CompanionSnapshot, CompanionTimelineEntry,
+    CompanionTimelinePage, CompanionTimelineToolCall, CompanionTimelineToolCallDetail,
+    CompanionToolCall, CompanionToolCallStatus, CompanionUpload,
 };
 pub use server::{CompanionServerHandle, CompanionServerStart, CompanionServerState};
 pub use session_mirror::{CompanionSessionMirror, CompanionSessionSource};
@@ -96,6 +100,59 @@ pub enum CompanionManagerEvent {
     StatusChanged,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CompanionQueueState {
+    pub queued_messages: Vec<CompanionQueuedMessage>,
+    pub assets: Vec<CompanionAsset>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompanionQueueDraft {
+    pub composer_draft: CompanionComposerDraft,
+    pub assets: Vec<CompanionAsset>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompanionComposerSubmission {
+    pub text: String,
+    pub attachments: Vec<CompanionUpload>,
+    pub draft_id: Option<String>,
+    pub retained_attachment_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompanionPreparedContent {
+    pub text: String,
+    pub rendered_html: Option<String>,
+    pub attachments: Vec<CompanionAttachment>,
+    pub assets: Vec<CompanionAsset>,
+}
+
+pub trait CompanionQueueController {
+    fn queue_state(&self, token_id: &str, cx: &App) -> Result<CompanionQueueState>;
+
+    fn send_or_queue_message(
+        &self,
+        submission: CompanionComposerSubmission,
+        cx: &mut App,
+    ) -> Task<Result<()>>;
+
+    fn remove_queued_message(&self, queued_message_id: &str, cx: &mut App) -> Result<()>;
+
+    fn send_queued_message_now(&self, queued_message_id: &str, cx: &mut App) -> Task<Result<()>>;
+
+    fn edit_queued_message(
+        &self,
+        queued_message_id: &str,
+        token_id: &str,
+        cx: &mut App,
+    ) -> Result<CompanionQueueDraft>;
+
+    fn discard_draft(&self, draft_id: &str, cx: &mut App) -> Result<()>;
+
+    fn clear_queued_messages(&self, cx: &mut App) -> Result<()>;
+}
+
 struct GlobalCompanionManager(Entity<CompanionManager>);
 
 impl Global for GlobalCompanionManager {}
@@ -107,6 +164,9 @@ pub struct CompanionManager {
     server: Option<CompanionServerHandle>,
     follow_source: Option<CompanionSessionSource>,
     pinned_source: Option<CompanionSessionSource>,
+    queue_controller: Option<Rc<dyn CompanionQueueController>>,
+    queue_state: CompanionQueueState,
+    draft_assets_by_id: HashMap<String, Vec<CompanionAsset>>,
     _mirror_subscription: Subscription,
     _command_task: Option<Task<Result<()>>>,
 }
@@ -182,6 +242,9 @@ impl CompanionManager {
             server: None,
             follow_source: None,
             pinned_source: None,
+            queue_controller: None,
+            queue_state: CompanionQueueState::default(),
+            draft_assets_by_id: HashMap::default(),
             _mirror_subscription: mirror_subscription,
             _command_task: None,
         };
@@ -197,6 +260,70 @@ impl CompanionManager {
         &self.status
     }
 
+    pub fn set_queue_controller(
+        &mut self,
+        queue_controller: Option<Rc<dyn CompanionQueueController>>,
+        cx: &mut Context<Self>,
+    ) {
+        let did_change = match (&self.queue_controller, &queue_controller) {
+            (Some(current), Some(next)) => !Rc::ptr_eq(current, next),
+            (None, None) => false,
+            _ => true,
+        };
+        if !did_change {
+            self.refresh_queue_state(cx);
+            return;
+        }
+
+        self.queue_controller = queue_controller;
+        self.draft_assets_by_id.clear();
+        if self.queue_controller.is_none() {
+            self.queue_state = CompanionQueueState::default();
+        } else {
+            self.refresh_queue_state(cx);
+        }
+        if let Some(server) = &self.server {
+            server.replace_assets(self.combined_assets(cx));
+            server.publish_snapshot(self.snapshot(cx));
+        }
+    }
+
+    pub fn refresh_queue_state(&mut self, cx: &mut Context<Self>) {
+        let Some(next_state) = self.current_queue_state(cx) else {
+            return;
+        };
+
+        if self.queue_state == next_state {
+            return;
+        }
+
+        self.queue_state = next_state;
+
+        if let Some(server) = &self.server {
+            let snapshot = self.snapshot(cx);
+            server.replace_assets(self.combined_assets(cx));
+            server.publish_snapshot(snapshot.clone());
+            server.publish_event(CompanionEvent::QueueChanged {
+                available_commands: snapshot.available_commands.clone(),
+                queued_messages: snapshot.queued_messages,
+            });
+        }
+
+        self.emit_status(cx);
+    }
+
+    fn current_queue_state(&self, cx: &App) -> Option<CompanionQueueState> {
+        self.queue_controller
+            .as_ref()
+            .map(|controller| controller.queue_state(&self.current_token_id(cx), cx))
+            .transpose()
+            .map_err(|error| {
+                log::warn!("failed to read companion queue state: {error:#}");
+            })
+            .ok()
+            .flatten()
+    }
+
     pub fn set_access_mode(&mut self, access_mode: CompanionAccessMode, cx: &mut Context<Self>) {
         if self.status.access_mode == access_mode {
             return;
@@ -206,8 +333,9 @@ impl CompanionManager {
 
         if let Some(server) = &self.server {
             server.set_access_mode(access_mode);
-            let snapshot = self.mirror.read(cx).snapshot().clone();
+            let snapshot = self.snapshot(cx);
             server.publish_snapshot(snapshot.clone());
+            server.replace_assets(self.combined_assets(cx));
             server.publish_event(CompanionEvent::SnapshotReplaced { snapshot });
         }
 
@@ -259,8 +387,9 @@ impl CompanionManager {
         self.mirror
             .update(cx, |mirror, cx| mirror.set_connection(connection, cx));
 
-        let initial_snapshot = self.mirror.read(cx).snapshot().clone();
-        let initial_assets = self.mirror.read(cx).assets().to_vec();
+        self.refresh_queue_state(cx);
+        let initial_snapshot = self.snapshot(cx);
+        let initial_assets = self.combined_assets(cx);
         self.status.state = CompanionServiceState::Starting;
         self.status.shared_session = initial_snapshot.session.clone();
         self.emit_status(cx);
@@ -463,23 +592,206 @@ impl CompanionManager {
         }
     }
 
+    fn snapshot(&self, cx: &App) -> CompanionSnapshot {
+        self.snapshot_with_queue_state(&self.queue_state, cx)
+    }
+
+    fn snapshot_with_queue_state(
+        &self,
+        queue_state: &CompanionQueueState,
+        cx: &App,
+    ) -> CompanionSnapshot {
+        let mut snapshot = self.mirror.read(cx).snapshot().clone();
+        snapshot.available_commands =
+            self.available_commands(&snapshot.available_commands, queue_state);
+        snapshot.queued_messages = queue_state.queued_messages.clone();
+        snapshot
+    }
+
+    fn available_commands(
+        &self,
+        mirror_commands: &[CompanionCommandKind],
+        queue_state: &CompanionQueueState,
+    ) -> Vec<CompanionCommandKind> {
+        let mut commands = mirror_commands.to_vec();
+        if !queue_state.queued_messages.is_empty() {
+            commands.extend([
+                CompanionCommandKind::EditQueuedMessage,
+                CompanionCommandKind::SendQueuedMessageNow,
+                CompanionCommandKind::RemoveQueuedMessage,
+                CompanionCommandKind::ClearQueuedMessages,
+            ]);
+        }
+        commands
+    }
+
+    fn combined_assets(&self, cx: &App) -> Vec<CompanionAsset> {
+        self.combined_assets_with_queue_state(&self.queue_state, cx)
+    }
+
+    fn combined_assets_with_queue_state(
+        &self,
+        queue_state: &CompanionQueueState,
+        cx: &App,
+    ) -> Vec<CompanionAsset> {
+        let mut assets = self.mirror.read(cx).assets().to_vec();
+        assets.extend(queue_state.assets.iter().cloned());
+        assets.extend(
+            self.draft_assets_by_id
+                .values()
+                .flat_map(|assets| assets.iter().cloned()),
+        );
+        assets
+    }
+
+    fn current_token_id(&self, cx: &App) -> String {
+        self.mirror.read(cx).snapshot().connection.token_id.clone()
+    }
+
     fn handle_command(
         &mut self,
         command: CompanionCommand,
         cx: &mut Context<Self>,
-    ) -> Task<Result<()>> {
+    ) -> Task<Result<CompanionCommandResponse>> {
         match command {
-            CompanionCommand::SendMessage { text, attachments } => self
-                .mirror
-                .update(cx, |mirror, cx| mirror.send_message(text, attachments, cx)),
+            CompanionCommand::SendMessage {
+                text,
+                attachments,
+                draft_id,
+                retained_attachment_ids,
+            } => {
+                let submission = CompanionComposerSubmission {
+                    text,
+                    attachments,
+                    draft_id: draft_id.clone(),
+                    retained_attachment_ids,
+                };
+
+                if let Some(queue_controller) = self.queue_controller.clone() {
+                    let task = queue_controller.send_or_queue_message(submission, cx);
+                    return cx.spawn(async move |this, cx| {
+                        task.await?;
+                        if let Some(draft_id) = draft_id {
+                            this.update(cx, |this, cx| {
+                                this.draft_assets_by_id.remove(&draft_id);
+                                if let Some(server) = &this.server {
+                                    server.replace_assets(this.combined_assets(cx));
+                                }
+                            })?;
+                        }
+                        Ok(CompanionCommandResponse::default())
+                    });
+                }
+
+                if draft_id.is_some() {
+                    return Task::ready(Err(anyhow::anyhow!(
+                        "companion draft editing is unavailable for this session"
+                    )));
+                }
+
+                self.mirror.update(cx, |mirror, cx| {
+                    let task = mirror.send_message(submission.text, submission.attachments, cx);
+                    cx.spawn(async move |_this, _cx| {
+                        task.await?;
+                        Ok(CompanionCommandResponse::default())
+                    })
+                })
+            }
+            CompanionCommand::RemoveQueuedMessage { queued_message_id } => {
+                let Some(queue_controller) = self.queue_controller.clone() else {
+                    return Task::ready(Err(anyhow::anyhow!(
+                        "message queue is unavailable for this session"
+                    )));
+                };
+                let result = queue_controller.remove_queued_message(&queued_message_id, cx);
+                if result.is_ok() {
+                    self.refresh_queue_state(cx);
+                }
+                Task::ready(result.map(|()| CompanionCommandResponse::default()))
+            }
+            CompanionCommand::SendQueuedMessageNow { queued_message_id } => {
+                let Some(queue_controller) = self.queue_controller.clone() else {
+                    return Task::ready(Err(anyhow::anyhow!(
+                        "message queue is unavailable for this session"
+                    )));
+                };
+                let task = queue_controller.send_queued_message_now(&queued_message_id, cx);
+                cx.spawn(async move |_this, _cx| {
+                    task.await?;
+                    Ok(CompanionCommandResponse::default())
+                })
+            }
+            CompanionCommand::EditQueuedMessage { queued_message_id } => {
+                let Some(queue_controller) = self.queue_controller.clone() else {
+                    return Task::ready(Err(anyhow::anyhow!(
+                        "message queue is unavailable for this session"
+                    )));
+                };
+                let draft = queue_controller.edit_queued_message(
+                    &queued_message_id,
+                    &self.current_token_id(cx),
+                    cx,
+                );
+                match draft {
+                    Ok(draft) => {
+                        self.draft_assets_by_id
+                            .insert(draft.composer_draft.id.clone(), draft.assets.clone());
+                        self.refresh_queue_state(cx);
+                        if let Some(server) = &self.server {
+                            server.replace_assets(self.combined_assets(cx));
+                        }
+                        Task::ready(Ok(CompanionCommandResponse {
+                            composer_draft: Some(draft.composer_draft),
+                        }))
+                    }
+                    Err(error) => Task::ready(Err(error)),
+                }
+            }
+            CompanionCommand::DiscardComposerDraft { draft_id } => {
+                let Some(queue_controller) = self.queue_controller.clone() else {
+                    return Task::ready(Err(anyhow::anyhow!(
+                        "message queue is unavailable for this session"
+                    )));
+                };
+                let result = queue_controller.discard_draft(&draft_id, cx);
+                if result.is_ok() {
+                    self.draft_assets_by_id.remove(&draft_id);
+                    if let Some(server) = &self.server {
+                        server.replace_assets(self.combined_assets(cx));
+                    }
+                }
+                Task::ready(result.map(|()| CompanionCommandResponse::default()))
+            }
+            CompanionCommand::ClearQueuedMessages => {
+                let Some(queue_controller) = self.queue_controller.clone() else {
+                    return Task::ready(Err(anyhow::anyhow!(
+                        "message queue is unavailable for this session"
+                    )));
+                };
+                let result = queue_controller.clear_queued_messages(cx);
+                if result.is_ok() {
+                    self.refresh_queue_state(cx);
+                }
+                Task::ready(result.map(|()| CompanionCommandResponse::default()))
+            }
             CompanionCommand::AuthorizeToolCall {
                 tool_call_id,
                 option_id,
                 option_kind,
             } => self.mirror.update(cx, |mirror, cx| {
-                mirror.authorize_tool_call(tool_call_id, option_id, option_kind, cx)
+                let task = mirror.authorize_tool_call(tool_call_id, option_id, option_kind, cx);
+                cx.spawn(async move |_this, _cx| {
+                    task.await?;
+                    Ok(CompanionCommandResponse::default())
+                })
             }),
-            CompanionCommand::StopRun => self.mirror.update(cx, |mirror, cx| mirror.stop_run(cx)),
+            CompanionCommand::StopRun => self.mirror.update(cx, |mirror, cx| {
+                let task = mirror.stop_run(cx);
+                cx.spawn(async move |_this, _cx| {
+                    task.await?;
+                    Ok(CompanionCommandResponse::default())
+                })
+            }),
         }
     }
 
@@ -490,11 +802,29 @@ impl CompanionManager {
         cx: &mut Context<Self>,
     ) {
         self.status.shared_session = mirror.read(cx).snapshot().session.clone();
+        let queue_state = self
+            .current_queue_state(cx)
+            .unwrap_or_else(|| self.queue_state.clone());
+        let queue_changed = self.queue_state != queue_state;
+        self.queue_state = queue_state;
 
         if let Some(server) = &self.server {
-            server.publish_snapshot(mirror.read(cx).snapshot().clone());
-            server.replace_assets(mirror.read(cx).assets().to_vec());
-            server.publish_event(event.clone());
+            let snapshot = self.snapshot_with_queue_state(&self.queue_state, cx);
+            server.publish_snapshot(snapshot.clone());
+            server.replace_assets(self.combined_assets_with_queue_state(&self.queue_state, cx));
+            if queue_changed {
+                server.publish_event(CompanionEvent::QueueChanged {
+                    available_commands: snapshot.available_commands.clone(),
+                    queued_messages: snapshot.queued_messages.clone(),
+                });
+            }
+            let outbound_event = match event {
+                CompanionEvent::SnapshotReplaced { .. } => {
+                    CompanionEvent::SnapshotReplaced { snapshot }
+                }
+                _ => event.clone(),
+            };
+            server.publish_event(outbound_event);
         }
 
         self.emit_status(cx);
@@ -504,6 +834,26 @@ impl CompanionManager {
         cx.emit(CompanionManagerEvent::StatusChanged);
         cx.notify();
     }
+}
+
+pub fn prepare_companion_content(
+    blocks: &[acp::ContentBlock],
+    message_id: &str,
+    token_id: &str,
+) -> CompanionPreparedContent {
+    let content = session_mirror::prepared_content_from_acp_blocks(blocks, message_id, token_id);
+    CompanionPreparedContent {
+        text: content.text,
+        rendered_html: content.rendered_html,
+        attachments: content.attachments,
+        assets: content.assets,
+    }
+}
+
+pub fn build_companion_upload_blocks(
+    uploads: Vec<CompanionUpload>,
+) -> Result<Vec<acp::ContentBlock>> {
+    session_mirror::companion_upload_blocks(uploads)
 }
 
 fn unix_time_ms() -> Option<u64> {
@@ -563,4 +913,157 @@ fn persistent_state_path() -> PathBuf {
     data_dir()
         .join("mobile_companion")
         .join("persistent_token.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::{Result, anyhow};
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    enum QueueStateResponse {
+        State(CompanionQueueState),
+        Unavailable,
+    }
+
+    struct FakeQueueController {
+        response: QueueStateResponse,
+    }
+
+    impl FakeQueueController {
+        fn with_state(queue_state: CompanionQueueState) -> Self {
+            Self {
+                response: QueueStateResponse::State(queue_state),
+            }
+        }
+
+        fn unavailable() -> Self {
+            Self {
+                response: QueueStateResponse::Unavailable,
+            }
+        }
+    }
+
+    impl CompanionQueueController for FakeQueueController {
+        fn queue_state(&self, _token_id: &str, _cx: &App) -> Result<CompanionQueueState> {
+            match &self.response {
+                QueueStateResponse::State(queue_state) => Ok(queue_state.clone()),
+                QueueStateResponse::Unavailable => Err(anyhow!("queue state unavailable")),
+            }
+        }
+
+        fn send_or_queue_message(
+            &self,
+            _submission: CompanionComposerSubmission,
+            _cx: &mut App,
+        ) -> Task<Result<()>> {
+            Task::ready(Ok(()))
+        }
+
+        fn remove_queued_message(&self, _queued_message_id: &str, _cx: &mut App) -> Result<()> {
+            Ok(())
+        }
+
+        fn send_queued_message_now(
+            &self,
+            _queued_message_id: &str,
+            _cx: &mut App,
+        ) -> Task<Result<()>> {
+            Task::ready(Ok(()))
+        }
+
+        fn edit_queued_message(
+            &self,
+            _queued_message_id: &str,
+            _token_id: &str,
+            _cx: &mut App,
+        ) -> Result<CompanionQueueDraft> {
+            Err(anyhow!("unused in test"))
+        }
+
+        fn discard_draft(&self, _draft_id: &str, _cx: &mut App) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_queued_messages(&self, _cx: &mut App) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn queued_state(id: &str, text: &str) -> CompanionQueueState {
+        CompanionQueueState {
+            queued_messages: vec![CompanionQueuedMessage {
+                id: id.to_string(),
+                is_next: true,
+                text: text.to_string(),
+                rendered_html: None,
+                attachments: Vec::new(),
+            }],
+            assets: Vec::new(),
+        }
+    }
+
+    #[gpui::test]
+    async fn set_queue_controller_preserves_existing_queue_on_read_failure(
+        cx: &mut TestAppContext,
+    ) {
+        let manager = cx.update(|cx| cx.new(|cx| CompanionManager::new(cx)));
+        let previous_queue_state = queued_state("queued-1", "keep me");
+
+        cx.update(|cx| {
+            manager.update(cx, |manager, cx| {
+                manager.queue_state = previous_queue_state.clone();
+                manager.set_queue_controller(Some(Rc::new(FakeQueueController::unavailable())), cx);
+            });
+        });
+
+        let actual_queue_state = cx.read(|cx| manager.read(cx).queue_state.clone());
+        assert_eq!(actual_queue_state, previous_queue_state);
+    }
+
+    #[gpui::test]
+    async fn set_queue_controller_clears_queue_when_controller_removed(cx: &mut TestAppContext) {
+        let manager = cx.update(|cx| cx.new(|cx| CompanionManager::new(cx)));
+        let queue_state = queued_state("queued-1", "clear me");
+
+        cx.update(|cx| {
+            manager.update(cx, |manager, cx| {
+                manager.set_queue_controller(
+                    Some(Rc::new(FakeQueueController::with_state(
+                        queue_state.clone(),
+                    ))),
+                    cx,
+                );
+                manager.set_queue_controller(None, cx);
+            });
+        });
+
+        let actual_queue_state = cx.read(|cx| manager.read(cx).queue_state.clone());
+        assert_eq!(actual_queue_state, CompanionQueueState::default());
+    }
+
+    #[gpui::test]
+    async fn set_queue_controller_replaces_queue_when_new_state_is_available(
+        cx: &mut TestAppContext,
+    ) {
+        let manager = cx.update(|cx| cx.new(|cx| CompanionManager::new(cx)));
+        let previous_queue_state = queued_state("queued-1", "old");
+        let next_queue_state = queued_state("queued-2", "new");
+
+        cx.update(|cx| {
+            manager.update(cx, |manager, cx| {
+                manager.queue_state = previous_queue_state;
+                manager.set_queue_controller(
+                    Some(Rc::new(FakeQueueController::with_state(
+                        next_queue_state.clone(),
+                    ))),
+                    cx,
+                );
+            });
+        });
+
+        let actual_queue_state = cx.read(|cx| manager.read(cx).queue_state.clone());
+        assert_eq!(actual_queue_state, next_queue_state);
+    }
 }

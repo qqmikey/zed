@@ -985,6 +985,116 @@ pub fn default_client_html() -> &'static str {
       box-shadow: 0 -14px 30px rgba(0, 0, 0, 0.2);
     }
 
+    .queue-panel {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .queue-panel.hidden {
+      display: none;
+    }
+
+    .queue-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .queue-panel-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-strong);
+    }
+
+    .queue-panel-subtitle {
+      font-size: 12px;
+      color: var(--text-soft);
+    }
+
+    .queue-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .queue-card {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .queue-card.next {
+      border-color: rgba(47, 111, 235, 0.34);
+      box-shadow: inset 0 0 0 1px rgba(47, 111, 235, 0.16);
+    }
+
+    .queue-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .queue-card-kicker {
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-soft);
+    }
+
+    .queue-card-body {
+      display: grid;
+      gap: 10px;
+    }
+
+    .queue-card-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .queue-action {
+      min-height: 34px;
+      padding: 0 12px;
+      font-size: 12px;
+    }
+
+    .composer-draft-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border-radius: 14px;
+      background: rgba(47, 111, 235, 0.12);
+      border: 1px solid rgba(47, 111, 235, 0.24);
+    }
+
+    .composer-draft-copy {
+      display: grid;
+      gap: 2px;
+    }
+
+    .composer-draft-title {
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-strong);
+    }
+
+    .composer-draft-subtitle {
+      font-size: 12px;
+      color: var(--text-soft);
+    }
+
     .composer.drag-active {
       border-top-color: rgba(47, 111, 235, 0.42);
       background:
@@ -1264,6 +1374,8 @@ pub fn default_client_html() -> &'static str {
       <div class="messages" id="messages"></div>
     </section>
 
+    <section class="queue-panel hidden" id="queue-panel"></section>
+
     <form class="composer" id="composer-form">
       <div class="permission-card" id="permission-card"></div>
       <div class="composer-input-shell">
@@ -1323,7 +1435,8 @@ pub fn default_client_html() -> &'static str {
           streaming_text: null,
           tool_calls: [],
           run_status: "idle",
-          available_commands: []
+          available_commands: [],
+          queued_messages: []
         },
         connectionState: "connecting",
         eventLog: [],
@@ -1333,6 +1446,8 @@ pub fn default_client_html() -> &'static str {
         pendingAuthorizationOptionId: null,
         pendingAuthorizationToolCallId: null,
         pendingAttachments: [],
+        editingDraft: null,
+        pendingQueueActionId: null,
         loadingOlderTimeline: false,
         selectedPermissionChoiceIndices: {},
         expandedToolCalls: {},
@@ -1360,6 +1475,7 @@ pub fn default_client_html() -> &'static str {
         activityLine: document.getElementById("activity-line"),
         permissionCard: document.getElementById("permission-card"),
         messages: document.getElementById("messages"),
+        queuePanel: document.getElementById("queue-panel"),
         composerForm: document.getElementById("composer-form"),
         input: document.getElementById("composer-input"),
         attachmentInput: document.getElementById("attachment-input"),
@@ -1558,10 +1674,15 @@ pub fn default_client_html() -> &'static str {
 
         if (currentSessionId !== nextSessionId) {
           state.expandedToolCalls = {};
+          clearComposerDraft();
+          state.pendingAttachments = [];
+          elements.attachmentInput.value = "";
+          elements.input.value = "";
         }
 
         state.snapshot = {
           ...snapshot,
+          queued_messages: snapshot.queued_messages || [],
           timeline: shouldMergeMessages
             ? mergeLatestTimeline(snapshot.timeline || [])
             : (snapshot.timeline || [])
@@ -1650,6 +1771,41 @@ pub fn default_client_html() -> &'static str {
           : "connection-log hidden";
       }
 
+      function queuedMessages() {
+        return state.snapshot.queued_messages || [];
+      }
+
+      function hasComposerDraft() {
+        return Boolean(state.editingDraft);
+      }
+
+      function clearComposerDraft() {
+        state.editingDraft = null;
+      }
+
+      function applyComposerDraft(draft) {
+        state.editingDraft = {
+          id: draft.id,
+          attachments: (draft.attachments || []).slice()
+        };
+        elements.input.value = draft.text || "";
+        state.pendingAttachments = [];
+        elements.attachmentInput.value = "";
+      }
+
+      function retainedAttachmentSummary(attachment) {
+        switch (attachment.type) {
+          case "image":
+            return attachment.mime_type || "image";
+          case "file":
+            return attachment.mime_type || "file";
+          case "link":
+            return "link";
+          default:
+            return "attachment";
+        }
+      }
+
       function selectedAttachmentSummary(file) {
         const size = file.size >= 1024 * 1024
           ? `${(file.size / (1024 * 1024)).toFixed(1)} MB`
@@ -1659,12 +1815,33 @@ pub fn default_client_html() -> &'static str {
       }
 
       function renderSelectedAttachments() {
-        if (!state.pendingAttachments.length) {
+        const retainedAttachments = state.editingDraft ? state.editingDraft.attachments : [];
+        if (!state.editingDraft && !retainedAttachments.length && !state.pendingAttachments.length) {
           elements.selectedAttachments.innerHTML = "";
           return;
         }
 
-        elements.selectedAttachments.innerHTML = state.pendingAttachments.map((file, index) => `
+        const draftBanner = state.editingDraft ? `
+          <div class="composer-draft-banner">
+            <div class="composer-draft-copy">
+              <div class="composer-draft-title">Editing queued message</div>
+              <div class="composer-draft-subtitle">Submitting will replace the queued draft with this updated message.</div>
+            </div>
+            <button class="secondary-button queue-action" type="button" data-draft-action="discard">Discard</button>
+          </div>
+        ` : "";
+
+        const retainedMarkup = retainedAttachments.map((attachment, index) => `
+          <div class="selected-attachment">
+            <div class="selected-attachment-copy">
+              <div class="selected-attachment-name">${escapeHtml(attachment.name)}</div>
+              <div class="selected-attachment-meta">${escapeHtml(retainedAttachmentSummary(attachment))}</div>
+            </div>
+            <button class="remove-attachment" type="button" data-retained-attachment-index="${index}">×</button>
+          </div>
+        `).join("");
+
+        const pendingMarkup = state.pendingAttachments.map((file, index) => `
           <div class="selected-attachment">
             <div class="selected-attachment-copy">
               <div class="selected-attachment-name">${escapeHtml(file.name)}</div>
@@ -1673,6 +1850,8 @@ pub fn default_client_html() -> &'static str {
             <button class="remove-attachment" type="button" data-attachment-index="${index}">×</button>
           </div>
         `).join("");
+
+        elements.selectedAttachments.innerHTML = draftBanner + retainedMarkup + pendingMarkup;
       }
 
       function hasFilePayload(dataTransfer) {
@@ -1687,7 +1866,6 @@ pub fn default_client_html() -> &'static str {
       function canAcceptAttachmentDrop(dataTransfer) {
         return attachmentUploadAvailable() &&
           !state.pendingSend &&
-          !commandAvailable("stop_run") &&
           hasFilePayload(dataTransfer);
       }
 
@@ -2132,6 +2310,50 @@ pub fn default_client_html() -> &'static str {
         return "";
       }
 
+      function renderQueuePanel() {
+        const queue = queuedMessages();
+        if (!queue.length) {
+          elements.queuePanel.className = "queue-panel hidden";
+          elements.queuePanel.innerHTML = "";
+          return;
+        }
+
+        const canEdit = commandAvailable("edit_queued_message");
+        const canSendNow = commandAvailable("send_queued_message_now");
+        const canRemove = commandAvailable("remove_queued_message");
+        const canClear = commandAvailable("clear_queued_messages");
+        const queueBusy = Boolean(state.pendingQueueActionId);
+
+        elements.queuePanel.className = "queue-panel";
+        elements.queuePanel.innerHTML = `
+          <div class="queue-panel-header">
+            <div>
+              <div class="queue-panel-title">Message Queue</div>
+              <div class="queue-panel-subtitle">${queue.length} message${queue.length === 1 ? "" : "s"} waiting to run</div>
+            </div>
+            <button class="secondary-button queue-action" type="button" data-queue-action="clear-all" ${(canClear && !queueBusy) ? "" : "disabled"}>${state.pendingQueueActionId === "__clear__" ? "Clearing..." : "Clear all"}</button>
+          </div>
+          <div class="queue-list">
+            ${queue.map(message => `
+              <article class="queue-card ${message.is_next ? "next" : ""}">
+                <div class="queue-card-head">
+                  <div class="queue-card-kicker">${message.is_next ? "Next in Queue" : "Queued"}</div>
+                </div>
+                <div class="queue-card-body">
+                  ${renderMessageBody(message)}
+                  ${renderAttachments(message.attachments || [])}
+                </div>
+                <div class="queue-card-actions">
+                  <button class="secondary-button queue-action" type="button" data-queue-action="edit" data-queue-id="${escapeHtml(message.id)}" ${(canEdit && !queueBusy) ? "" : "disabled"}>${state.pendingQueueActionId === message.id ? "Working..." : "Edit"}</button>
+                  <button class="secondary-button queue-action" type="button" data-queue-action="send-now" data-queue-id="${escapeHtml(message.id)}" ${(canSendNow && !queueBusy) ? "" : "disabled"}>${state.pendingQueueActionId === message.id ? "Working..." : "Send now"}</button>
+                  <button class="secondary-button queue-action" type="button" data-queue-action="remove" data-queue-id="${escapeHtml(message.id)}" ${(canRemove && !queueBusy) ? "" : "disabled"}>${state.pendingQueueActionId === message.id ? "Working..." : "Remove"}</button>
+                </div>
+              </article>
+            `).join("")}
+          </div>
+        `;
+      }
+
       function toolCallKindLabel(toolCall) {
         const detailTypes = new Set((toolCall.details || []).map(detail => detail.type));
         if (detailTypes.has("edit")) {
@@ -2365,26 +2587,37 @@ pub fn default_client_html() -> &'static str {
         const canSend = commandAvailable("send_message") && !state.pendingSend;
         const attachmentsAllowed =
           state.pendingAttachments.length === 0 || attachmentUploadAvailable();
-        const sendReady = canSend &&
-          attachmentsAllowed &&
-          (elements.input.value.trim().length > 0 || state.pendingAttachments.length > 0);
+        const retainedAttachments = state.editingDraft ? state.editingDraft.attachments.length : 0;
+        const hasComposerContent =
+          elements.input.value.trim().length > 0 ||
+          state.pendingAttachments.length > 0 ||
+          retainedAttachments > 0;
+        const sendReady = canSend && attachmentsAllowed && hasComposerContent;
+        const showStopAction = hasStop && !hasComposerContent;
 
-        if (hasStop) {
+        if (showStopAction) {
           elements.actionButton.textContent = "■";
           elements.actionButton.className = "action-button composer-submit-button stop";
           elements.actionButton.setAttribute("aria-label", "Stop run");
           elements.actionButton.setAttribute("title", "Stop");
           elements.actionButton.disabled = false;
-          elements.input.disabled = true;
-          elements.attachButton.disabled = true;
-          elements.input.placeholder = "Wait for the current run to finish or stop it.";
+          elements.input.disabled = hasPermissionRequest || !commandAvailable("send_message");
+          elements.attachButton.disabled =
+            hasPermissionRequest || !attachmentUploadAvailable() || state.pendingSend;
+          elements.input.placeholder = "Type a follow-up to add it to the queue.";
           return;
         }
 
         elements.actionButton.textContent = state.pendingSend ? "…" : "↑";
         elements.actionButton.className = "action-button composer-submit-button";
-        elements.actionButton.setAttribute("aria-label", state.pendingSend ? "Sending" : "Send message");
-        elements.actionButton.setAttribute("title", state.pendingSend ? "Sending..." : "Send");
+        elements.actionButton.setAttribute(
+          "aria-label",
+          state.pendingSend ? "Sending" : (hasStop ? "Queue message" : "Send message")
+        );
+        elements.actionButton.setAttribute(
+          "title",
+          state.pendingSend ? "Sending..." : (hasStop ? "Add to queue" : "Send")
+        );
         elements.actionButton.disabled = hasPermissionRequest || !sendReady;
         elements.input.disabled = hasPermissionRequest || !commandAvailable("send_message");
         elements.attachButton.disabled =
@@ -2392,7 +2625,7 @@ pub fn default_client_html() -> &'static str {
         elements.input.placeholder = hasPermissionRequest
           ? "Respond to the permission request above."
           : (commandAvailable("send_message")
-          ? "Send a follow-up to the active Zed session"
+          ? (hasStop ? "Type a follow-up to add it to the queue." : "Send a follow-up to the active Zed session")
           : "This session is not ready for input");
       }
 
@@ -2412,6 +2645,7 @@ pub fn default_client_html() -> &'static str {
 
         renderPermissionCard();
         renderTimeline();
+        renderQueuePanel();
         renderSelectedAttachments();
         renderActionButton();
         renderConnectionLog();
@@ -2525,6 +2759,9 @@ pub fn default_client_html() -> &'static str {
           }
           throw new Error(errorText || `Command failed with status ${response.status}`);
         }
+
+        const responseText = (await response.text()).trim();
+        return responseText ? JSON.parse(responseText) : {};
       }
 
       async function loadSnapshot() {
@@ -2535,6 +2772,14 @@ pub fn default_client_html() -> &'static str {
 
         applySnapshot(await response.json(), true);
         render();
+      }
+
+      async function refreshSnapshotAfterCommand() {
+        try {
+          await loadSnapshot();
+        } catch (error) {
+          pushEvent(`Companion state refresh failed: ${error}`, "error");
+        }
       }
 
       async function loadOlderTimeline() {
@@ -2596,6 +2841,10 @@ pub fn default_client_html() -> &'static str {
             break;
           case "run_status_changed":
             state.snapshot.run_status = event.run_status;
+            break;
+          case "queue_changed":
+            state.snapshot.available_commands = event.available_commands || [];
+            state.snapshot.queued_messages = event.queued_messages || [];
             break;
           default:
             break;
@@ -2699,8 +2948,10 @@ pub fn default_client_html() -> &'static str {
 
       async function sendMessage() {
         const text = elements.input.value.trim();
+        const retainedDraftAttachments = state.editingDraft ? state.editingDraft.attachments : [];
+        const wasQueueing = commandAvailable("stop_run");
         if (
-          (!text && state.pendingAttachments.length === 0) ||
+          (!text && state.pendingAttachments.length === 0 && retainedDraftAttachments.length === 0) ||
           !commandAvailable("send_message") ||
           (state.pendingAttachments.length > 0 && !attachmentUploadAvailable())
         ) {
@@ -2712,18 +2963,129 @@ pub fn default_client_html() -> &'static str {
 
         try {
           const attachments = await Promise.all(state.pendingAttachments.map(fileToUpload));
-          await postCommand({ type: "send_message", text, attachments });
+          await postCommand({
+            type: "send_message",
+            text,
+            attachments,
+            draft_id: state.editingDraft ? state.editingDraft.id : null,
+            retained_attachment_ids: retainedDraftAttachments.map(attachment => attachment.id)
+          });
           elements.input.value = "";
           state.pendingAttachments = [];
           elements.attachmentInput.value = "";
+          clearComposerDraft();
           state.forceScrollToBottom = true;
           state.isPinnedToBottom = true;
           state.pendingAnimatedScroll = true;
-          pushEvent("Message sent to the active Zed session.", "success");
+          state.pendingSend = false;
+          await refreshSnapshotAfterCommand();
+          pushEvent(
+            wasQueueing
+              ? "Message added to the queue."
+              : "Message sent to the active Zed session.",
+            "success"
+          );
         } catch (error) {
           pushEvent(`Failed to send message: ${error}`, "error");
         } finally {
           state.pendingSend = false;
+          render();
+        }
+      }
+
+      async function editQueuedMessage(queuedMessageId) {
+        if (!commandAvailable("edit_queued_message")) {
+          return;
+        }
+
+        state.pendingQueueActionId = queuedMessageId;
+        render();
+
+        try {
+          const response = await postCommand({
+            type: "edit_queued_message",
+            queued_message_id: queuedMessageId
+          });
+          if (!response.composer_draft) {
+            throw new Error("Queued message edit did not return a draft.");
+          }
+
+          applyComposerDraft(response.composer_draft);
+          await refreshSnapshotAfterCommand();
+          pushEvent("Queued message moved into the composer.", "success");
+        } catch (error) {
+          pushEvent(`Failed to edit queued message: ${error}`, "error");
+        } finally {
+          state.pendingQueueActionId = null;
+          render();
+        }
+      }
+
+      async function removeQueuedMessage(queuedMessageId) {
+        if (!commandAvailable("remove_queued_message")) {
+          return;
+        }
+
+        state.pendingQueueActionId = queuedMessageId;
+        render();
+
+        try {
+          await postCommand({
+            type: "remove_queued_message",
+            queued_message_id: queuedMessageId
+          });
+          await refreshSnapshotAfterCommand();
+          pushEvent("Queued message removed.", "success");
+        } catch (error) {
+          pushEvent(`Failed to remove queued message: ${error}`, "error");
+        } finally {
+          state.pendingQueueActionId = null;
+          render();
+        }
+      }
+
+      async function sendQueuedMessageNow(queuedMessageId) {
+        if (!commandAvailable("send_queued_message_now")) {
+          return;
+        }
+
+        state.pendingQueueActionId = queuedMessageId;
+        render();
+
+        try {
+          await postCommand({
+            type: "send_queued_message_now",
+            queued_message_id: queuedMessageId
+          });
+          await refreshSnapshotAfterCommand();
+          pushEvent("Queued message sent.", "success");
+          state.forceScrollToBottom = true;
+          state.isPinnedToBottom = true;
+          state.pendingAnimatedScroll = true;
+        } catch (error) {
+          pushEvent(`Failed to send queued message: ${error}`, "error");
+        } finally {
+          state.pendingQueueActionId = null;
+          render();
+        }
+      }
+
+      async function clearQueuedMessages() {
+        if (!commandAvailable("clear_queued_messages")) {
+          return;
+        }
+
+        state.pendingQueueActionId = "__clear__";
+        render();
+
+        try {
+          await postCommand({ type: "clear_queued_messages" });
+          await refreshSnapshotAfterCommand();
+          pushEvent("Queued messages cleared.", "success");
+        } catch (error) {
+          pushEvent(`Failed to clear queued messages: ${error}`, "error");
+        } finally {
+          state.pendingQueueActionId = null;
           render();
         }
       }
@@ -2787,7 +3149,13 @@ pub fn default_client_html() -> &'static str {
       }
 
       async function handlePrimaryAction() {
-        if (commandAvailable("stop_run")) {
+        const retainedDraftAttachments = state.editingDraft ? state.editingDraft.attachments : [];
+        const hasComposerContent =
+          elements.input.value.trim().length > 0 ||
+          state.pendingAttachments.length > 0 ||
+          retainedDraftAttachments.length > 0;
+
+        if (commandAvailable("stop_run") && !hasComposerContent) {
           await stopRun();
           return;
         }
@@ -2805,7 +3173,7 @@ pub fn default_client_html() -> &'static str {
       });
 
       elements.attachButton.addEventListener("click", () => {
-        if (!attachmentUploadAvailable() || state.pendingSend || commandAvailable("stop_run")) {
+        if (!attachmentUploadAvailable() || state.pendingSend) {
           return;
         }
         elements.attachmentInput.click();
@@ -2820,6 +3188,34 @@ pub fn default_client_html() -> &'static str {
       });
 
       elements.selectedAttachments.addEventListener("click", event => {
+        const draftAction = event.target.closest("[data-draft-action]");
+        if (draftAction) {
+          if (!state.editingDraft) {
+            return;
+          }
+
+          const draftId = state.editingDraft.id;
+          postCommand({
+            type: "discard_composer_draft",
+            draft_id: draftId
+          }).catch(error => {
+            pushEvent(`Failed to discard queued draft: ${error}`, "error");
+          });
+          clearComposerDraft();
+          render();
+          return;
+        }
+
+        const retainedButton = event.target.closest("[data-retained-attachment-index]");
+        if (retainedButton && state.editingDraft) {
+          const index = Number(retainedButton.getAttribute("data-retained-attachment-index"));
+          if (Number.isFinite(index)) {
+            state.editingDraft.attachments.splice(index, 1);
+            render();
+          }
+          return;
+        }
+
         const button = event.target.closest("[data-attachment-index]");
         if (!button) {
           return;
@@ -2923,6 +3319,38 @@ pub fn default_client_html() -> &'static str {
 
         state.expandedToolCalls[toolCallId] = !state.expandedToolCalls[toolCallId];
         render();
+      });
+
+      elements.queuePanel.addEventListener("click", event => {
+        const actionButton = event.target.closest("[data-queue-action]");
+        if (!actionButton) {
+          return;
+        }
+
+        const action = actionButton.getAttribute("data-queue-action");
+        if (action === "clear-all") {
+          clearQueuedMessages();
+          return;
+        }
+
+        const queuedMessageId = actionButton.getAttribute("data-queue-id");
+        if (!queuedMessageId || state.pendingQueueActionId) {
+          return;
+        }
+
+        if (action === "edit") {
+          editQueuedMessage(queuedMessageId);
+          return;
+        }
+
+        if (action === "send-now") {
+          sendQueuedMessageNow(queuedMessageId);
+          return;
+        }
+
+        if (action === "remove") {
+          removeQueuedMessage(queuedMessageId);
+        }
       });
 
       elements.connectionPill.addEventListener("click", event => {
@@ -3061,7 +3489,7 @@ pub fn default_client_html() -> &'static str {
       });
 
       elements.input.addEventListener("keydown", event => {
-        if (event.key === "Enter" && !event.shiftKey && !event.metaKey && !commandAvailable("stop_run")) {
+        if (event.key === "Enter" && !event.shiftKey && !event.metaKey) {
           event.preventDefault();
           handlePrimaryAction();
         }

@@ -32,8 +32,8 @@ use tokio::{
 use crate::static_client;
 use crate::{
     CompanionAccessMode, CompanionAsset, CompanionAssetDisposition, CompanionAssetSource,
-    CompanionCommand, CompanionCommandKind, CompanionEvent, CompanionSnapshot,
-    CompanionTimelineEntry, CompanionTimelinePage,
+    CompanionCommand, CompanionCommandKind, CompanionCommandResponse, CompanionEvent,
+    CompanionSnapshot, CompanionTimelineEntry, CompanionTimelinePage,
 };
 
 const COMMAND_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
@@ -53,7 +53,7 @@ pub struct CompanionServerState {
 
 pub struct CompanionCommandRequest {
     pub command: CompanionCommand,
-    pub response_tx: oneshot::Sender<std::result::Result<(), String>>,
+    pub response_tx: oneshot::Sender<std::result::Result<CompanionCommandResponse, String>>,
 }
 
 pub struct CompanionServerStart {
@@ -290,7 +290,7 @@ async fn companion_command(
     State(state): State<CompanionServerState>,
     Query(query): Query<CompanionAuthQuery>,
     Json(command): Json<CompanionCommand>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<Json<CompanionCommandResponse>, (StatusCode, String)> {
     authorize(&state, &query).map_err(|status| (status, "Unauthorized.".into()))?;
     if current_access_mode(&state) == CompanionAccessMode::ReadOnly {
         return Err((
@@ -313,7 +313,7 @@ async fn companion_command(
         })?;
 
     match response_rx.await {
-        Ok(Ok(())) => Ok(StatusCode::NO_CONTENT),
+        Ok(Ok(response)) => Ok(Json(response)),
         Ok(Err(message)) => Err((StatusCode::CONFLICT, message)),
         Err(_) => Err((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -448,6 +448,11 @@ fn filter_available_commands(
                 command,
                 CompanionCommandKind::SendMessage
                     | CompanionCommandKind::SendAttachments
+                    | CompanionCommandKind::RemoveQueuedMessage
+                    | CompanionCommandKind::SendQueuedMessageNow
+                    | CompanionCommandKind::EditQueuedMessage
+                    | CompanionCommandKind::DiscardComposerDraft
+                    | CompanionCommandKind::ClearQueuedMessages
                     | CompanionCommandKind::AuthorizeToolCall
                     | CompanionCommandKind::StopRun
             )
@@ -620,9 +625,10 @@ mod tests {
     use super::{CompanionServerState, default_client_html, router};
     use crate::{
         CompanionAccessMode, CompanionAsset, CompanionAssetDisposition, CompanionAssetSource,
-        CompanionCommand, CompanionCommandKind, CompanionConnectionMetadata, CompanionMessage,
-        CompanionMessageRole, CompanionMessageStatus, CompanionRunStatus, CompanionSnapshot,
-        CompanionTimelineEntry, CompanionTimelinePage, CompanionUpload,
+        CompanionCommand, CompanionCommandKind, CompanionCommandResponse,
+        CompanionConnectionMetadata, CompanionMessage, CompanionMessageRole,
+        CompanionMessageStatus, CompanionRunStatus, CompanionSnapshot, CompanionTimelineEntry,
+        CompanionTimelinePage, CompanionUpload,
     };
 
     fn test_state() -> (
@@ -644,6 +650,7 @@ mod tests {
             tool_calls: Vec::new(),
             run_status: CompanionRunStatus::Idle,
             available_commands: Vec::new(),
+            queued_messages: Vec::new(),
         });
         let _snapshot_tx = snapshot_tx;
         let (event_tx, _) = broadcast::channel(16);
@@ -776,9 +783,14 @@ mod tests {
             available_commands: vec![
                 CompanionCommandKind::SendMessage,
                 CompanionCommandKind::SendAttachments,
+                CompanionCommandKind::EditQueuedMessage,
+                CompanionCommandKind::SendQueuedMessageNow,
+                CompanionCommandKind::RemoveQueuedMessage,
+                CompanionCommandKind::ClearQueuedMessages,
                 CompanionCommandKind::AuthorizeToolCall,
                 CompanionCommandKind::StopRun,
             ],
+            queued_messages: Vec::new(),
         };
         let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
         let _snapshot_tx = snapshot_tx;
@@ -837,6 +849,7 @@ mod tests {
             tool_calls: Vec::new(),
             run_status: CompanionRunStatus::Completed,
             available_commands: Vec::new(),
+            queued_messages: Vec::new(),
         };
         let (snapshot_tx, snapshot_rx) = watch::channel(snapshot);
         let _snapshot_tx = snapshot_tx;
@@ -885,6 +898,8 @@ mod tests {
                         serde_json::to_vec(&CompanionCommand::SendMessage {
                             text: "hello from mobile".into(),
                             attachments: Vec::new(),
+                            draft_id: None,
+                            retained_attachment_ids: Vec::new(),
                         })
                         .expect("json"),
                     ))
@@ -900,12 +915,17 @@ mod tests {
             CompanionCommand::SendMessage {
                 text: "hello from mobile".into(),
                 attachments: Vec::new(),
+                draft_id: None,
+                retained_attachment_ids: Vec::new(),
             }
         );
-        request.response_tx.send(Ok(())).expect("response sent");
+        request
+            .response_tx
+            .send(Ok(CompanionCommandResponse::default()))
+            .expect("response sent");
 
         let response = response.await.expect("join");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -926,6 +946,8 @@ mod tests {
                         serde_json::to_vec(&CompanionCommand::SendMessage {
                             text: "hello from mobile".into(),
                             attachments: Vec::new(),
+                            draft_id: None,
+                            retained_attachment_ids: Vec::new(),
                         })
                         .expect("json"),
                     ))
@@ -971,10 +993,13 @@ mod tests {
                 option_kind: "AllowOnce".into(),
             }
         );
-        request.response_tx.send(Ok(())).expect("response sent");
+        request
+            .response_tx
+            .send(Ok(CompanionCommandResponse::default()))
+            .expect("response sent");
 
         let response = response.await.expect("join");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -995,6 +1020,8 @@ mod tests {
                                 mime_type: "image/png".into(),
                                 data_base64: "A".repeat(3 * 1024 * 1024),
                             }],
+                            draft_id: None,
+                            retained_attachment_ids: Vec::new(),
                         })
                         .expect("json"),
                     ))
@@ -1012,10 +1039,13 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
-        request.response_tx.send(Ok(())).expect("response sent");
+        request
+            .response_tx
+            .send(Ok(CompanionCommandResponse::default()))
+            .expect("response sent");
 
         let response = response.await.expect("join");
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

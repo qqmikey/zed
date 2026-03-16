@@ -91,6 +91,7 @@ mod thread_view;
 pub use thread_view::*;
 
 pub struct QueuedMessage {
+    pub id: String,
     pub content: Vec<acp::ContentBlock>,
     pub tracked_buffers: Vec<Entity<Buffer>>,
 }
@@ -2160,12 +2161,15 @@ impl ConnectionView {
         cx: &mut Context<Self>,
     ) -> bool {
         match self.active_thread() {
-            Some(thread) => thread.update(cx, |thread, _cx| {
+            Some(thread) => thread.update(cx, |thread, cx| {
                 if index < thread.local_queued_messages.len() {
+                    let queued_message_id = thread.local_queued_messages[index].id.clone();
                     thread.local_queued_messages[index] = QueuedMessage {
+                        id: queued_message_id,
                         content,
                         tracked_buffers,
                     };
+                    thread.queue_did_change(cx);
                     true
                 } else {
                     false
