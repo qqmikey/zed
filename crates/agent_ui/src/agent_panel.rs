@@ -708,12 +708,12 @@ pub fn init(cx: &mut App) {
                         (CompanionServiceState::Running, Some(access_info)) => {
                             cx.open_url(&access_info.url);
                         }
-                        (CompanionServiceState::Starting, _) => AgentPanel::show_toast(
+                        (CompanionServiceState::Starting, _) => AgentPanel::show_deferred_toast(
                             &workspace,
                             "Mobile companion is still starting",
                             cx,
                         ),
-                        _ => AgentPanel::show_toast(
+                        _ => AgentPanel::show_deferred_toast(
                             &workspace,
                             "Start mobile companion sharing before opening it locally",
                             cx,
@@ -6503,6 +6503,57 @@ mod tests {
             Rc::ptr_eq(&first_controller, &second_controller),
             "sync_companion_source should reuse the same queue controller for the same thread"
         );
+    }
+
+    #[gpui::test]
+    async fn test_open_mobile_companion_locally_when_stopped_does_not_panic(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            cx.update_flags(true, vec!["agent-v2".to_string()]);
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let text_thread_store = cx.new(|cx| TextThreadStore::fake(project.clone(), cx));
+            let panel =
+                cx.new(|cx| AgentPanel::new(workspace, text_thread_store, None, window, cx));
+            workspace.add_panel(panel, window, cx);
+        });
+
+        cx.run_until_parked();
+
+        cx.read(|cx| {
+            let companion_manager = CompanionManager::try_global(cx)
+                .expect("companion manager should be initialized for the workspace");
+            assert_eq!(
+                companion_manager.read(cx).status().state,
+                CompanionServiceState::Stopped,
+                "test should cover the default stopped companion state when settings omit mobile_companion"
+            );
+        });
+
+        workspace.update_in(cx, |_, window, cx| {
+            window.dispatch_action(OpenMobileCompanionLocally.boxed_clone(), cx);
+        });
+
+        cx.run_until_parked();
     }
 
     #[gpui::test]
